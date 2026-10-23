@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/yuetu-core",
+    "crates/yuetu-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+
+[workspace.dependencies]
+yuetu-core = { path = "crates/yuetu-core" }
+
+egui = "0.37.0"
+eframe = { version = "0.37.0", default-features = false, features = [
+    "wgpu",
+    "default_fonts",
+    "system_fonts",
+    "clipboard",
+    "links",
+    "wayland",
+    "x11",
+] }
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+    "jpeg",
+    "bmp",
+    "gif",
+    "webp",
+    "tiff",
+] }
+midly = "0.5.3"
+rfd = "0.17.2"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
