@@ -1,3 +1,4 @@
+pub mod midi_gpu;
 pub mod midi_preview;
 pub mod split_handle;
 pub mod stage_image;

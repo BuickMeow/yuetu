@@ -26,6 +26,8 @@ pub struct YuetuApp {
     stage: PipelineStage,
     stage_stops: Vec<StageStop>,
     stage_hover: Option<StageHover>,
+    checker_texture: egui::TextureHandle,
+    gpu_target_format: eframe::wgpu::TextureFormat,
     source_view: View2D,
     key_view: View2D,
     palette_view: View2D,
@@ -48,6 +50,12 @@ pub struct YuetuApp {
 impl YuetuApp {
     pub fn new(cc: &eframe::CreationContext<'_>, startup_image: Option<PathBuf>) -> Self {
         theme::apply(&cc.egui_ctx);
+        let checker_texture = theme::checker_texture(&cc.egui_ctx);
+        let gpu_target_format = cc
+            .wgpu_render_state
+            .as_ref()
+            .map(|state| state.target_format)
+            .unwrap_or(eframe::wgpu::TextureFormat::Bgra8UnormSrgb);
 
         let mut app = Self {
             source: None,
@@ -57,6 +65,8 @@ impl YuetuApp {
             stage: PipelineStage::Source,
             stage_stops: Vec::new(),
             stage_hover: None,
+            checker_texture,
+            gpu_target_format,
             source_view: View2D::default(),
             key_view: View2D::default(),
             palette_view: View2D::default(),
@@ -466,6 +476,8 @@ impl eframe::App for YuetuApp {
             }
         }
 
+        let checker_texture = self.checker_texture.id();
+        let gpu_target_format = self.gpu_target_format;
         let mut stage_action = ui::stage_panel::Action::default();
         egui::CentralPanel::default()
             .frame(theme::panel_frame(ui, theme::PanelKind::Central))
@@ -489,6 +501,8 @@ impl eframe::App for YuetuApp {
                     &mut self.stage_hover,
                     updating,
                     progress,
+                    checker_texture,
+                    gpu_target_format,
                 );
             });
 

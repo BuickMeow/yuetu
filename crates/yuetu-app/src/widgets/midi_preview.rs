@@ -4,18 +4,27 @@
 //! preview is tick 0, and time flows upward. Each note is colored by its
 //! palette track.
 
+use std::sync::Arc;
+
 use egui::{Color32, CursorIcon, FontId, Rect, Stroke, Ui};
 use yuetu_core::{ConversionResult, is_white_key, note_name};
 
 use crate::state::StageHover;
 use crate::theme;
+use crate::widgets::midi_gpu::{MidiGpuCallback, MidiGpuData};
 use crate::widgets::view2d::View2D;
 
 pub struct PreviewOutput {
     pub hovered: Option<StageHover>,
 }
 
-pub fn show(ui: &mut Ui, result: &ConversionResult, view: &mut View2D) -> PreviewOutput {
+pub fn show(
+    ui: &mut Ui,
+    result: &ConversionResult,
+    midi_gpu: &Arc<MidiGpuData>,
+    view: &mut View2D,
+    gpu_target_format: eframe::wgpu::TextureFormat,
+) -> PreviewOutput {
     let key_span = result.keymap.width().max(1) as f32;
     let duration = result.duration_px.max(1) as f32;
     let interaction = view.interact(ui, egui::vec2(key_span, duration), CursorIcon::Crosshair);
@@ -107,79 +116,21 @@ pub fn show(ui: &mut Ui, result: &ConversionResult, view: &mut View2D) -> Previe
         tick = tick.saturating_add(step);
     }
 
-    // ── Notes ──────────────────────────────────────────────────────
-    let palette: Vec<Color32> = result
-        .palette
-        .colors
-        .iter()
-        .map(|color| Color32::from_rgba_unmultiplied(color.r, color.g, color.b, color.a))
-        .collect();
-    let outline = (result.notes.len() < 8_000 && scale >= 2.0)
-        .then(|| Stroke::new(1.0, Color32::from_black_alpha(90)));
-
-    let mut key_columns = [None; 128];
-    for column in 0..keymap.width() {
-        if let Some(key) = keymap.key_at(column) {
-            key_columns[key as usize] = Some(column);
-        }
-    }
-
-    // Batch all visible note rectangles into one mesh. This avoids one
-    // egui::Shape + tessellation pass per note; the mesh is still rendered by
-    // egui's wgpu backend. For six-figure note counts this is the first
-    // optimization; a dedicated instanced wgpu pass can replace it later.
-    let mut fills = egui::Mesh::default();
-    let mut outlines = egui::Mesh::default();
-    for note in &result.notes {
-        let Some(column) = key_columns[note.key as usize] else {
-            continue;
-        };
-        let x0 = content.left() + column as f32 * scale;
-        let x1 = x0 + scale;
-        let y0 = content.bottom() - note.end as f32 * scale;
-        let y1 = content.bottom() - note.start as f32 * scale;
-
-        let left = x0 + 0.3;
-        let right = (x1 - 0.3).max(left + 0.5);
-        let top = y0 + 0.2;
-        let bottom = (y1 - 0.2).max(top + 0.5);
-        let rect = Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
-        if !rect.intersects(interaction.viewport) {
-            continue;
-        }
-
-        let color = palette
-            .get(note.track as usize)
-            .copied()
-            .unwrap_or_else(|| theme::accent(ui));
-        fills.add_colored_rect(rect, color);
-
-        if let Some(stroke) = outline {
-            let w = stroke.width;
-            outlines.add_colored_rect(
-                Rect::from_min_max(rect.min, egui::pos2(rect.max.x, rect.min.y + w)),
-                stroke.color,
-            );
-            outlines.add_colored_rect(
-                Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - w), rect.max),
-                stroke.color,
-            );
-            outlines.add_colored_rect(
-                Rect::from_min_max(rect.min, egui::pos2(rect.min.x + w, rect.max.y)),
-                stroke.color,
-            );
-            outlines.add_colored_rect(
-                Rect::from_min_max(egui::pos2(rect.max.x - w, rect.min.y), rect.max),
-                stroke.color,
-            );
-        }
-    }
-
-    if !fills.is_empty() {
-        painter.add(egui::Shape::mesh(fills));
-    }
-    if !outlines.is_empty() {
-        painter.add(egui::Shape::mesh(outlines));
+    // ── Notes: one instanced GPU draw ──────────────────────────────
+    // Instances live in Preview and are re-uploaded only when a new
+    // ConversionResult arrives. Pan/zoom only updates the uniform.
+    if !midi_gpu.is_empty() {
+        let callback = eframe::egui_wgpu::Callback::new_paint_callback(
+            interaction.viewport,
+            MidiGpuCallback::new(
+                Arc::clone(midi_gpu),
+                interaction.viewport,
+                content,
+                scale,
+                gpu_target_format,
+            ),
+        );
+        painter.add(egui::Shape::Callback(callback));
     }
 
     // ── Hover ──────────────────────────────────────────────────────

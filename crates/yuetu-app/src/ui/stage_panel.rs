@@ -21,6 +21,8 @@ pub fn show(
     hover: &mut Option<StageHover>,
     updating: bool,
     progress: Option<&ProgressView>,
+    checker_texture: egui::TextureId,
+    gpu_target_format: eframe::wgpu::TextureFormat,
 ) -> Action {
     let mut action = Action::default();
 
@@ -38,6 +40,7 @@ pub fn show(
                 source.texture.id(),
                 (source.image.width, source.image.height),
                 source.has_transparency,
+                checker_texture,
             );
             *hover = hovered.map(|pixel| StageHover::Source {
                 pos: (pixel.x, pixel.y),
@@ -62,6 +65,7 @@ pub fn show(
                         preview.resized_texture.id(),
                         preview.result.resized_size,
                         preview.resized_has_transparency,
+                        checker_texture,
                     );
                     *hover = hovered.map(|pixel| StageHover::KeyMap {
                         pos: (pixel.x, pixel.y),
@@ -83,6 +87,7 @@ pub fn show(
                             preview.result.indexed_image.height,
                         ),
                         preview.indexed_has_transparency,
+                        checker_texture,
                     );
                     *hover = hovered.map(|pixel| {
                         let index = preview.result.indexed_image.at(pixel.x, pixel.y);
@@ -101,7 +106,13 @@ pub fn show(
                     });
                 }
                 PipelineStage::Midi => {
-                    let output = midi_preview::show(ui, &preview.result, view);
+                    let output = midi_preview::show(
+                        ui,
+                        &preview.result,
+                        &preview.midi_gpu,
+                        view,
+                        gpu_target_format,
+                    );
                     *hover = output.hovered;
                 }
                 PipelineStage::Source => unreachable!(),

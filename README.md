@@ -17,7 +17,8 @@
 - 触控板双指滚动平移（上下左右）、捏合缩放；鼠标滚轮只缩放；方向键平移；
 - 左侧面板使用自定义 split handle，拖动宽度、双击恢复默认；
 - 设置卡片统一为“名称在左、控件在右”，卡片标题和操作同一行；
-- 钢琴卷帘音符合并为单个 `egui::Mesh`；
+- 图片本身是单个 GPU 纹理 quad；透明棋盘格是一张可重复纹理，一个 quad 由 GPU 平铺；
+- MIDI 音符使用自定义 `egui_wgpu::Callback` + 持久 instance buffer，一次 instanced draw 完成；
 - 导出标准 Format-1 `.mid`，可选写入原版的颜色 Meta 事件。
 
 > 这一步的重点不是功能多，而是把**数据边界**先定下来：
@@ -58,7 +59,7 @@ crates/
     settings.rs        #   UI 参数 → core 配置
     state.rs           #   SourceImage / Preview / PipelineStage / 状态消息
     ui/                #   面板拆分（controls/stage/status）
-    widgets/           #   图标流水线、阶段图片、钢琴卷帘、View2D
+    widgets/           #   图标流水线、阶段图片、GPU 音符渲染、View2D
     theme.rs           #   主题
 ```
 
@@ -67,8 +68,9 @@ crates/
 ## 当前故意没做的事
 
 - 调色板只有 popularity 一种算法。后续按同一 `Palette` 接口加入 K-Means、Octree、抖动等。
-- 预览的音符已经合并成一个 `egui::Mesh`（不再每个音符一个 Shape）；只有经过性能测量、确实需要时才下沉到自定义 wgpu instancing pipeline。
-- 大图高倍缩放时，棋盘背景只处理可见区域，并且不透明图片完全跳过棋盘绘制；5000×5000 图片在约 1900% 缩放下仍可交互。
+- 图片显示已经是 GPU 纹理采样，不需要每帧重建像素；大图只在加载时上传/降采样纹理。
+- 透明棋盘格是一张 2×2 可重复纹理，单个 quad 由 GPU 平铺；不透明图直接跳过。
+- MIDI 音符使用 wgpu instance buffer，只在 `ConversionResult` 变化时上传，缩放/平移只改 uniform；5000×5000 图片在约 1900% 缩放下仍可交互。
 - 视频解码尚未接入。GIF/动态 WebP 已支持逐帧选择；视频需要单独的 ffmpeg 或原生解码导入层。
 - 手动调色板 / 原图取色替换尚未接入 UI。
 

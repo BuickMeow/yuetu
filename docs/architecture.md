@@ -218,23 +218,17 @@ eframe / egui / wgpu 已经处理窗口的 `pixels_per_point`：布局、字体�
 
 ```text
 eframe::Renderer::Wgpu
-  ├─ egui 全部 UI 的三角形上传 / 绘制
-  ├─ 源图 / 键位图 / 索引色图：egui::TextureHandle → wgpu 纹理
-  └─ MIDI 预览：egui::Mesh（一个批次）→ wgpu
+  ├─ egui UI / 标尺 / 网格：tessellation → wgpu
+  ├─ 源图 / 键位图 / 索引色图：单个 egui 纹理 quad → wgpu
+  ├─ 透明棋盘格：2×2 Repeat 纹理 + 单个 quad → GPU 平铺
+  └─ MIDI 音符：egui_wgpu::Callback + instance buffer → 一次 instanced draw
 ```
 
-目前没有自定义 wgpu pipeline。阶段纹理在每次转换完成时生成一次，切换阶段只切纹理/视图状态；音符合并成单个 `egui::Mesh`，避免“每个音符一个 Shape + 一次 tessellation”的 CPU 开销。GPU 填充这些矩形本身很便宜；真正的瓶颈会先出现在 CPU 生成顶点和每帧上传顶点。
+- 图片显示本来就是一个纹理 quad，GPU 采样；不需要每帧 CPU 重建像素。
+- 棋盘格改为一张可重复的 2×2 灰度纹理，通过 `TextureWrapMode::Repeat` 和单个 Mesh quad 绘制；不再逐格生成 Shape。
+- MIDI 音符实例在 `ConversionResult` 变化时构建并上传一次；拖动/缩放只更新 uniform，GPU 每帧一次 instanced draw。实例数据包含列、start/end、颜色，顶点 shader 直接生成 note quad。
 
-大图高倍缩放曾经的主要卡顿源是棋盘背景：它按整个内容矩形生成单元格，缩放越大单元格数量按面积增长。现在只遍历内容与视口的交集，并且源图/阶段图不透明时直接跳过棋盘；5000×5000 约 1900% 缩放实测可交互。
-
-当音符数量达到数十万、或需要 LOD/GPU culling 时，再把 `midi_preview` 换成自定义 `egui_wgpu::Callback`：
-
-- 音符实例只在数据变化时上传；
-- 缩放/平移通过 uniform 完成；
-- 视口裁剪在 GPU 做；
-- 预览渲染到离屏纹理，再由 egui 显示。
-
-`ConversionResult` 契约不变，替换范围仍然在一个 widget 内。
+大图高倍缩放曾经的主要卡顿源是棋盘背景逐格生成；现在所有阶段纹理和音符都在 GPU 批量绘制。5000×5000 约 1900% 缩放实测可交互。`ConversionResult` 契约不变，替换范围仍被限制在 phase widgets 内。
 
 ---
 
@@ -263,7 +257,9 @@ eframe::Renderer::Wgpu
 ### M4：性能与工程化
 
 - 预览 LOD：按缩放级别合并音符，限制每帧 shape 数；
-- 必要时自定义 wgpu pipeline / compute culling；
+- [x] 透明棋盘格 GPU 平铺；
+- [x] MIDI 音符自定义 wgpu instanced pipeline；
+- [ ] 必要时做 GPU culling / LOD；
 - 转换缓存（图片 hash + 配置 hash）；
 - 端到端快照测试（无头 egui_kittest）。
 

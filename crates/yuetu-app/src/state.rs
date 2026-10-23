@@ -9,6 +9,8 @@ use yuetu_core::{
     load_image_sequence,
 };
 
+use crate::widgets::midi_gpu::MidiGpuData;
+
 /// Longest side of the texture uploaded to the GPU. The conversion still uses
 /// the full-resolution CPU image; this is display-only.
 const MAX_TEXTURE_SIDE: u32 = 4096;
@@ -176,6 +178,8 @@ pub struct Preview {
     /// Display texture for the palette-indexed image.
     pub indexed_texture: TextureHandle,
     pub indexed_has_transparency: bool,
+    /// Persistent GPU instance data for the MIDI stage.
+    pub midi_gpu: Arc<MidiGpuData>,
 }
 
 impl Preview {
@@ -194,6 +198,8 @@ impl Preview {
         let indexed_name = format!("stage:indexed:{source_revision}");
         let indexed_texture = upload_texture(ctx, &indexed_name, &indexed_rgba)?;
 
+        let midi_gpu = Arc::new(MidiGpuData::from_result(&result));
+
         Ok(Self {
             result,
             config,
@@ -202,6 +208,7 @@ impl Preview {
             resized_has_transparency,
             indexed_texture,
             indexed_has_transparency,
+            midi_gpu,
         })
     }
 }

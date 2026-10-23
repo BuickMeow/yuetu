@@ -125,6 +125,31 @@ pub fn panel_frame(ui: &Ui, kind: PanelKind) -> Frame {
     }
 }
 
+/// Small tiled checkerboard sampled by the GPU. The texture repeats, so a
+/// single quad can cover any transparent area without generating per-cell CPU
+/// geometry.
+pub fn checker_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    // Use explicit opaque grays: `faint_bg_color` can be transparent, and
+    // `extreme_bg_color` is nearly identical to the stage background.
+    let light = Color32::from_gray(54);
+    let dark = Color32::from_gray(32);
+    let mut pixels = Vec::with_capacity(16);
+    for color in [light, dark, dark, light] {
+        pixels.extend_from_slice(&color.to_array());
+    }
+    let image = egui::ColorImage::from_rgba_unmultiplied([2, 2], &pixels);
+    ctx.load_texture(
+        "yuetu.checker",
+        image,
+        egui::TextureOptions {
+            magnification: egui::TextureFilter::Nearest,
+            minification: egui::TextureFilter::Nearest,
+            wrap_mode: egui::TextureWrapMode::Repeat,
+            mipmap_mode: None,
+        },
+    )
+}
+
 pub fn card_frame(ui: &Ui) -> Frame {
     if CUSTOM_THEME {
         Frame::new()

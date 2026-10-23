@@ -18,6 +18,7 @@ pub fn show(
     texture: egui::TextureId,
     content_size: (u32, u32),
     checkerboard: bool,
+    checker_texture: egui::TextureId,
 ) -> Option<RasterHover> {
     let size = egui::vec2(content_size.0.max(1) as f32, content_size.1.max(1) as f32);
     let interaction = view.interact(ui, size, CursorIcon::Crosshair);
@@ -25,11 +26,11 @@ pub fn show(
 
     painter.rect_filled(interaction.viewport, 0.0, theme::view_bg(ui));
     if checkerboard {
-        draw_checkerboard(
+        draw_checkerboard_quad(
             &painter,
             interaction.content_rect,
             interaction.viewport,
-            ui.visuals(),
+            checker_texture,
         );
     }
 
@@ -65,33 +66,34 @@ pub fn show(
     hovered
 }
 
-fn draw_checkerboard(painter: &egui::Painter, rect: Rect, viewport: Rect, visuals: &egui::Visuals) {
+fn draw_checkerboard_quad(
+    painter: &egui::Painter,
+    rect: Rect,
+    viewport: Rect,
+    checker_texture: egui::TextureId,
+) {
     let visible = rect.intersect(viewport);
     if !visible.is_positive() {
         return;
     }
 
-    // Only walk the visible part of the canvas. Zooming a large image to a
-    // huge content rect used to manufacture millions of off-screen cells.
-    let cell = 12.0;
-    let light = visuals.faint_bg_color;
-    let x0 = ((visible.left() - rect.left()) / cell).floor() as i32;
-    let x1 = ((visible.right() - rect.left()) / cell).ceil() as i32;
-    let y0 = ((visible.top() - rect.top()) / cell).floor() as i32;
-    let y1 = ((visible.bottom() - rect.top()) / cell).ceil() as i32;
-    for y in y0..y1 {
-        for x in x0..x1 {
-            if (x + y) % 2 != 0 {
-                continue;
-            }
-            let min = egui::pos2(rect.left() + x as f32 * cell, rect.top() + y as f32 * cell);
-            let max = egui::pos2(
-                (min.x + cell).min(rect.right()),
-                (min.y + cell).min(rect.bottom()),
-            );
-            painter.rect_filled(Rect::from_min_max(min, max), 0.0, light);
-        }
-    }
+    // The 2x2 checker texture repeats. One quad covers the visible transparent
+    // area; the GPU sampler does all the tiling.
+    const CHECKER_PERIOD: f32 = 24.0;
+    let uv = Rect::from_min_max(
+        egui::pos2(
+            (visible.left() - rect.left()) / CHECKER_PERIOD,
+            (visible.top() - rect.top()) / CHECKER_PERIOD,
+        ),
+        egui::pos2(
+            (visible.right() - rect.left()) / CHECKER_PERIOD,
+            (visible.bottom() - rect.top()) / CHECKER_PERIOD,
+        ),
+    );
+    let mut mesh = egui::Mesh::default();
+    mesh.texture_id = checker_texture;
+    mesh.add_rect_with_uv(visible, uv, Color32::WHITE);
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 fn draw_rulers(
