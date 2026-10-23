@@ -9,7 +9,6 @@ use crate::ui::{card, section_title};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Action {
     pub open: bool,
-    pub convert: bool,
     pub cancel: bool,
     pub export: bool,
 }
@@ -208,25 +207,13 @@ pub fn show(
                     if ui.add(cancel).clicked() {
                         action.cancel = true;
                     }
-                } else {
-                    let enabled = settings.validate().is_ok();
-                    let button = egui::Button::new(RichText::new("生成 MIDI 预览").strong())
-                        .fill(theme::primary_fill(ui))
-                        .min_size(egui::vec2(ui.available_width(), 34.0));
-                    if ui.add_enabled(enabled, button).clicked() {
-                        action.convert = true;
-                    }
-                    if !enabled {
-                        ui.label(
-                            RichText::new(settings.validate().unwrap_err())
-                                .color(theme::danger(ui)),
-                        );
-                    }
                 }
 
+                let can_export =
+                    preview.is_some_and(|preview| preview.config == settings.conversion_config());
                 let export = egui::Button::new("导出 MIDI…")
                     .min_size(egui::vec2(ui.available_width(), 30.0));
-                if ui.add_enabled(preview.is_some(), export).clicked() {
+                if ui.add_enabled(can_export, export).clicked() {
                     action.export = true;
                 }
             }

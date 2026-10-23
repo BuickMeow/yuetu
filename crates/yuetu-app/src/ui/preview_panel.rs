@@ -5,12 +5,10 @@ use crate::state::{Preview, PreviewHover};
 use crate::theme;
 use crate::widgets::{View2D, midi_preview};
 
-#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     preview: Option<&Preview>,
-    stale: bool,
-    is_running: bool,
+    updating: bool,
     progress: Option<&ProgressView>,
     view: &mut View2D,
     hover: &mut Option<PreviewHover>,
@@ -31,7 +29,7 @@ pub fn show(
         });
     });
 
-    if is_running {
+    if updating {
         if let Some(progress) = progress {
             ui.add(
                 egui::ProgressBar::new(progress.overall)
@@ -51,8 +49,6 @@ pub fn show(
                     .animate(true),
             );
         }
-    } else if stale {
-        ui.label(RichText::new("预览已过期").color(theme::warning(ui)));
     }
     ui.add_space(6.0);
 

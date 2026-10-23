@@ -11,6 +11,11 @@ use crate::theme;
 use crate::ui;
 use crate::widgets::{View2D, split_handle};
 
+/// Wait this long after the last parameter edit before starting a new job.
+/// It keeps a slider drag from spawning one conversion per frame while still
+/// feeling immediate.
+const AUTO_CONVERT_DEBOUNCE: Duration = Duration::from_millis(80);
+
 pub struct YuetuApp {
     source: Option<SourceImage>,
     preview: Option<Preview>,
@@ -27,6 +32,9 @@ pub struct YuetuApp {
     job_progress: Option<ProgressView>,
     job_config: Option<ConversionConfig>,
     job_started: Option<Instant>,
+    /// When the next automatic conversion should start. `None` means no
+    /// parameters changed since the last result/job.
+    auto_convert_at: Option<Instant>,
 
     left_panel_width: f32,
     right_panel_width: f32,
@@ -49,6 +57,7 @@ impl YuetuApp {
             job_progress: None,
             job_config: None,
             job_started: None,
+            auto_convert_at: None,
             left_panel_width: 310.0,
             right_panel_width: 560.0,
         };
@@ -77,6 +86,7 @@ impl YuetuApp {
         self.job_progress = None;
         self.job_config = None;
         self.job_started = None;
+        self.auto_convert_at = None;
 
         match SourceImage::load(ctx, path.clone()) {
             Ok(source) => {
@@ -90,6 +100,7 @@ impl YuetuApp {
                 self.preview_hover = None;
                 self.image_view.reset_fit();
                 self.preview_view.reset_fit();
+                self.schedule_auto_conversion(ctx, Duration::ZERO);
             }
             Err(error) => {
                 tracing::warn!("failed to load image {}: {error}", path.display());
@@ -98,11 +109,8 @@ impl YuetuApp {
         }
     }
 
-    fn run_conversion(&mut self) {
-        if self.jobs.is_running() {
-            self.status = StatusMessage::warning("正在生成");
-            return;
-        }
+    fn start_conversion(&mut self, ctx: &egui::Context) {
+        self.auto_convert_at = None;
 
         let Some(source) = self.source.as_ref() else {
             self.status = StatusMessage::warning("未打开图片");
@@ -120,6 +128,7 @@ impl YuetuApp {
                 self.job_started = Some(Instant::now());
                 self.job_progress = Some(ProgressView::new(Stage::Palette, 0.0));
                 self.status = StatusMessage::info("正在生成");
+                ctx.request_repaint();
             }
             Err(error) => {
                 tracing::warn!("failed to spawn conversion job: {error}");
@@ -128,7 +137,51 @@ impl YuetuApp {
         }
     }
 
+    /// Mark the current settings as dirty. A short debounce collapses slider
+    /// drags into one conversion instead of cancelling and restarting per frame.
+    fn schedule_auto_conversion(&mut self, ctx: &egui::Context, delay: Duration) {
+        let deadline = Instant::now() + delay;
+        self.auto_convert_at = Some(deadline);
+        if !delay.is_zero() {
+            ctx.request_repaint_after(delay);
+        }
+    }
+
+    fn tick_auto_conversion(&mut self, ctx: &egui::Context) {
+        let Some(deadline) = self.auto_convert_at else {
+            return;
+        };
+        let now = Instant::now();
+        if now < deadline {
+            ctx.request_repaint_after(deadline - now);
+            return;
+        }
+
+        self.auto_convert_at = None;
+        if self.source.is_none() {
+            return;
+        }
+
+        let config = self.settings.conversion_config();
+        // A job for exactly these settings is already doing the work.
+        if self.jobs.is_running() && self.job_config.as_ref() == Some(&config) {
+            return;
+        }
+        // A finished job already produced this exact result.
+        if !self.jobs.is_running()
+            && self
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.config == config)
+        {
+            return;
+        }
+
+        self.start_conversion(ctx);
+    }
+
     fn cancel_conversion(&mut self) {
+        self.auto_convert_at = None;
         if !self.jobs.is_running() {
             return;
         }
@@ -160,15 +213,25 @@ impl YuetuApp {
                         .map(|started| started.elapsed())
                         .unwrap_or_default();
                     let config = self.job_config.take().unwrap_or_default();
+                    let current = self.settings.conversion_config();
+                    let had_preview = self.preview.is_some();
                     self.job_progress = None;
-                    self.status = StatusMessage::success(format!(
-                        "生成完成：{} 音符 · {} 音轨 · 用时 {:.1} ms",
-                        result.note_count(),
-                        result.track_count(),
-                        elapsed.as_secs_f64() * 1000.0
-                    ));
+                    if config == current {
+                        self.status = StatusMessage::success(format!(
+                            "生成完成：{} 音符 · {} 音轨 · 用时 {:.1} ms",
+                            result.note_count(),
+                            result.track_count(),
+                            elapsed.as_secs_f64() * 1000.0
+                        ));
+                    } else {
+                        self.status = StatusMessage::info("正在更新预览…");
+                    }
                     self.preview = Some(Preview { result, config });
-                    self.preview_view.reset_fit();
+                    // Auto updates should keep the user's zoom/pan; only fit a
+                    // newly displayed preview.
+                    if !had_preview {
+                        self.preview_view.reset_fit();
+                    }
                 }
                 JobEvent::Failed { message, .. } => {
                     self.job_progress = None;
@@ -196,6 +259,10 @@ impl YuetuApp {
             self.status = StatusMessage::warning("暂无可导出的预览");
             return;
         };
+        if preview.config != self.settings.conversion_config() {
+            self.status = StatusMessage::warning("预览正在更新，请稍候");
+            return;
+        }
 
         let default_name = self
             .source
@@ -227,16 +294,12 @@ impl YuetuApp {
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let open = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::O));
-        let convert = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::Enter));
         let export = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::S));
         let cancel = self.jobs.is_running()
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
 
         if open {
             self.open_dialog(ctx);
-        }
-        if convert {
-            self.run_conversion();
         }
         if export {
             self.export_dialog();
@@ -260,10 +323,11 @@ impl YuetuApp {
         }
     }
 
-    fn preview_is_stale(&self) -> bool {
+    fn preview_is_current(&self) -> bool {
+        let config = self.settings.conversion_config();
         self.preview
             .as_ref()
-            .is_some_and(|preview| preview.is_stale(&self.settings.conversion_config()))
+            .is_some_and(|preview| preview.config == config)
     }
 
     fn clamp_panel_widths(&mut self, total_width: f32) {
@@ -285,19 +349,16 @@ impl eframe::App for YuetuApp {
         let root_rect = ui.max_rect();
         let total_width = root_rect.width();
         self.clamp_panel_widths(total_width);
-        let stale = self.preview_is_stale();
+        let config_before = self.settings.conversion_config();
+        let updating = self.jobs.is_running() || self.auto_convert_at.is_some();
 
         let mut toolbar_action = ui::toolbar::Action::default();
         egui::Panel::top("toolbar")
             .show_separator_line(false)
             .frame(theme::panel_frame(ui, theme::PanelKind::Top))
             .show(ui, |ui| {
-                toolbar_action = ui::toolbar::show(
-                    ui,
-                    self.source.is_some(),
-                    self.preview.is_some(),
-                    self.jobs.is_running(),
-                );
+                toolbar_action =
+                    ui::toolbar::show(ui, self.preview_is_current(), self.jobs.is_running());
             });
 
         // Reserve the status bar before the central panel. It intentionally
@@ -346,8 +407,7 @@ impl eframe::App for YuetuApp {
                 ui::preview_panel::show(
                     ui,
                     self.preview.as_ref(),
-                    stale,
-                    self.jobs.is_running(),
+                    updating,
                     self.job_progress.as_ref(),
                     &mut self.preview_view,
                     &mut self.preview_hover,
@@ -411,10 +471,6 @@ impl eframe::App for YuetuApp {
             self.open_dialog(&ctx);
             acted = true;
         }
-        if toolbar_action.convert || controls_action.convert {
-            self.run_conversion();
-            acted = true;
-        }
         if toolbar_action.export || controls_action.export {
             self.export_dialog();
             acted = true;
@@ -428,6 +484,12 @@ impl eframe::App for YuetuApp {
             self.preview_view.reset_fit();
             acted = true;
         }
+
+        if self.source.is_some() && self.settings.conversion_config() != config_before {
+            self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+            acted = true;
+        }
+        self.tick_auto_conversion(&ctx);
 
         if acted {
             ctx.request_repaint();

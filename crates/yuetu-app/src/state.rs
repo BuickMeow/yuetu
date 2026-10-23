@@ -84,14 +84,9 @@ impl SourceImage {
 
 pub struct Preview {
     pub result: ConversionResult,
-    /// The config that produced this preview; used to detect stale results.
+    /// The config that produced this preview; used to gate export while an
+    /// automatic update is still running.
     pub config: ConversionConfig,
-}
-
-impl Preview {
-    pub fn is_stale(&self, current: &ConversionConfig) -> bool {
-        self.config != *current
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

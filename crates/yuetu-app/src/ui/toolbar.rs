@@ -5,13 +5,12 @@ use crate::theme;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Action {
     pub open: bool,
-    pub convert: bool,
     pub cancel: bool,
     pub export: bool,
     pub fit: bool,
 }
 
-pub fn show(ui: &mut Ui, has_source: bool, can_export: bool, is_running: bool) -> Action {
+pub fn show(ui: &mut Ui, can_export: bool, is_running: bool) -> Action {
     let mut action = Action::default();
 
     ui.horizontal(|ui| {
@@ -37,14 +36,6 @@ pub fn show(ui: &mut Ui, has_source: bool, can_export: bool, is_running: bool) -
             {
                 action.cancel = true;
             }
-        } else if ui
-            .add_enabled(
-                has_source,
-                egui::Button::new(RichText::new("生成预览").strong()).fill(theme::primary_fill(ui)),
-            )
-            .clicked()
-        {
-            action.convert = true;
         }
         if ui
             .add_enabled(can_export, egui::Button::new("导出 MIDI"))
