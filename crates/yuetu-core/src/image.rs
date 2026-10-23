@@ -6,8 +6,21 @@
 
 use std::path::Path;
 
+use image::AnimationDecoder;
+
 use crate::color::Color;
 use crate::error::{Error, Result};
+
+/// Decoded frames from a still image or an animated GIF/WebP.
+#[derive(Clone, Debug)]
+pub struct ImageSequence {
+    pub frames: Vec<RgbaImage>,
+    /// Per-frame delay in milliseconds; the static-image case has one zero.
+    pub delays_ms: Vec<u32>,
+}
+
+const MAX_ANIMATION_FRAMES: usize = 1024;
+const MAX_ANIMATION_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RgbaImage {
@@ -86,16 +99,87 @@ impl RgbaImage {
     }
 }
 
-/// Decode the first frame of a raster image into RGBA8.
-///
-/// Animated GIF/WebP support can be added later by returning a frame list;
-/// the rest of the pipeline never needs to know where the frame came from.
-pub fn load_image(path: &Path) -> Result<RgbaImage> {
+/// Decode an image, including every frame of an animated GIF/WebP.
+pub fn load_image_sequence(path: &Path) -> Result<ImageSequence> {
     let reader = image::ImageReader::open(path)?.with_guessed_format()?;
-    let decoded = reader.decode()?;
+    match reader.format() {
+        Some(image::ImageFormat::Gif) => {
+            let decoder = image::codecs::gif::GifDecoder::new(reader.into_inner())?;
+            decode_animation(decoder)
+        }
+        Some(image::ImageFormat::WebP) => {
+            let decoder = image::codecs::webp::WebPDecoder::new(reader.into_inner())?;
+            if decoder.has_animation() {
+                decode_animation(decoder)
+            } else {
+                decode_still(path)
+            }
+        }
+        _ => sequence_from_dynamic(reader.decode()?),
+    }
+}
+
+fn decode_still(path: &Path) -> Result<ImageSequence> {
+    let decoded = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()?;
+    sequence_from_dynamic(decoded)
+}
+
+fn sequence_from_dynamic(decoded: image::DynamicImage) -> Result<ImageSequence> {
     let rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
-    RgbaImage::from_rgba(width, height, rgba.into_raw())
+    Ok(ImageSequence {
+        frames: vec![RgbaImage::from_rgba(width, height, rgba.into_raw())?],
+        delays_ms: vec![0],
+    })
+}
+
+fn decode_animation<'a>(decoder: impl AnimationDecoder<'a>) -> Result<ImageSequence> {
+    let mut frames = Vec::new();
+    let mut delays_ms = Vec::new();
+    let mut total_bytes = 0usize;
+
+    for frame in decoder.into_frames() {
+        let frame = frame?;
+        if frames.len() >= MAX_ANIMATION_FRAMES {
+            return Err(Error::InvalidImage(format!(
+                "动画帧数超过 {MAX_ANIMATION_FRAMES}"
+            )));
+        }
+
+        let (numerator, denominator) = frame.delay().numer_denom_ms();
+        let delay_ms = if denominator == 0 {
+            0
+        } else {
+            numerator / denominator
+        };
+        let buffer = frame.into_buffer();
+        let (width, height) = buffer.dimensions();
+        let image = RgbaImage::from_rgba(width, height, buffer.into_raw())?;
+        total_bytes = total_bytes.saturating_add(image.pixels.len());
+        if total_bytes > MAX_ANIMATION_BYTES {
+            return Err(Error::InvalidImage(format!(
+                "动画帧数据超过 {} MiB 上限",
+                MAX_ANIMATION_BYTES / (1024 * 1024)
+            )));
+        }
+
+        frames.push(image);
+        delays_ms.push(delay_ms);
+    }
+
+    if frames.is_empty() {
+        return Err(Error::InvalidImage("动画没有可解码的帧".into()));
+    }
+
+    Ok(ImageSequence { frames, delays_ms })
+}
+
+/// Decode the first frame of a raster image into RGBA8.
+pub fn load_image(path: &Path) -> Result<RgbaImage> {
+    let mut sequence = load_image_sequence(path)?;
+    Ok(sequence.frames.remove(0))
 }
 
 /// Decode an in-memory image (used by drag-and-drop / pasted bytes later).

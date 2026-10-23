@@ -4,15 +4,17 @@ use crate::jobs::ProgressView;
 use crate::settings::Settings;
 use crate::state::{Preview, SourceImage};
 use crate::theme;
-use crate::ui::{card, section_title};
+use crate::ui::{card, section_title, setting_row};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Action {
     pub open: bool,
     pub cancel: bool,
     pub export: bool,
+    pub frame: Option<usize>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     settings: &mut Settings,
@@ -20,6 +22,7 @@ pub fn show(
     preview: Option<&Preview>,
     is_running: bool,
     progress: Option<&ProgressView>,
+    can_export: bool,
 ) -> Action {
     let mut action = Action::default();
 
@@ -27,32 +30,60 @@ pub fn show(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             card(ui, |ui| {
-                section_title(ui, "源图");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("源图").strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("打开图片…").clicked() {
+                            action.open = true;
+                        }
+                    });
+                });
+                ui.add_space(2.0);
+
                 if let Some(source) = source {
                     ui.label(RichText::new(source.name.as_str()).strong());
-                    ui.label(format!(
-                        "{} × {} px",
-                        source.image.width, source.image.height
-                    ));
+                    if source.frame_count() > 1 {
+                        ui.label(format!(
+                            "{} × {} px · {} 帧",
+                            source.image.width,
+                            source.image.height,
+                            source.frame_count()
+                        ));
+                        setting_row(ui, "帧", |ui| {
+                            let count = source.frame_count() as u32;
+                            let mut frame = source.frame_index() as u32 + 1;
+                            let response = ui.add(
+                                egui::DragValue::new(&mut frame)
+                                    .range(1..=count)
+                                    .speed(1.0)
+                                    .suffix(format!(" / {count}")),
+                            );
+                            if response.changed() {
+                                action.frame = Some(frame.saturating_sub(1) as usize);
+                            }
+                        });
+                    } else {
+                        ui.label(format!(
+                            "{} × {} px",
+                            source.image.width, source.image.height
+                        ));
+                    }
                 } else {
                     ui.label("尚未打开图片");
-                }
-                if ui.button("打开图片…").clicked() {
-                    action.open = true;
                 }
             });
 
             ui.add_space(10.0);
             card(ui, |ui| {
                 section_title(ui, "键位映射");
-                ui.horizontal(|ui| {
-                    ui.label("起始键");
+                setting_row(ui, "起始键", |ui| {
                     ui.add(
                         egui::DragValue::new(&mut settings.key_start)
                             .range(0..=127)
                             .speed(1.0),
                     );
-                    ui.label("结束键");
+                });
+                setting_row(ui, "结束键", |ui| {
                     ui.add(
                         egui::DragValue::new(&mut settings.key_end)
                             .range(0..=127)
@@ -63,8 +94,7 @@ pub fn show(
                     settings.key_end = settings.key_start;
                 }
 
-                ui.horizontal(|ui| {
-                    ui.label("键过滤");
+                setting_row(ui, "键过滤", |ui| {
                     egui::ComboBox::from_id_salt("key_filter")
                         .selected_text(settings.key_filter.label())
                         .show_ui(ui, |ui| {
@@ -86,8 +116,7 @@ pub fn show(
                         });
                 });
 
-                ui.horizontal(|ui| {
-                    ui.label("列映射");
+                setting_row(ui, "列映射", |ui| {
                     egui::ComboBox::from_id_salt("column_mapping")
                         .selected_text(settings.column_mapping.label())
                         .show_ui(ui, |ui| {
@@ -108,16 +137,14 @@ pub fn show(
             ui.add_space(10.0);
             card(ui, |ui| {
                 section_title(ui, "调色板与缩放");
-                ui.horizontal(|ui| {
-                    ui.label("颜色数");
+                setting_row(ui, "颜色数", |ui| {
                     ui.add(
                         egui::DragValue::new(&mut settings.palette_colors)
                             .range(1..=256)
                             .speed(1.0),
                     );
                 });
-                ui.horizontal(|ui| {
-                    ui.label("缩放算法");
+                setting_row(ui, "缩放算法", |ui| {
                     egui::ComboBox::from_id_salt("resize_algorithm")
                         .selected_text(settings.resize.label())
                         .show_ui(ui, |ui| {
@@ -143,49 +170,63 @@ pub fn show(
             ui.add_space(10.0);
             card(ui, |ui| {
                 section_title(ui, "音符长度");
-                ui.checkbox(&mut settings.limit_note_length, "限制最大音符长度");
+                setting_row(ui, "限制最大音符长度", |ui| {
+                    ui.add(egui::Checkbox::without_text(
+                        &mut settings.limit_note_length,
+                    ));
+                });
                 if settings.limit_note_length {
-                    ui.horizontal(|ui| {
-                        ui.label("最长");
+                    setting_row(ui, "最大长度", |ui| {
                         ui.add(
                             egui::DragValue::new(&mut settings.max_note_length)
                                 .range(1..=65_535)
                                 .suffix(" 行"),
                         );
                     });
-                    ui.radio_value(
-                        &mut settings.measure_from_image_start,
-                        false,
-                        "按持有时长重触发",
-                    );
-                    ui.radio_value(
-                        &mut settings.measure_from_image_start,
-                        true,
-                        "按图像起始网格切分",
-                    );
+                    setting_row(ui, "长度测量", |ui| {
+                        let selected = if settings.measure_from_image_start {
+                            "按图像起始网格"
+                        } else {
+                            "按持有时长"
+                        };
+                        egui::ComboBox::from_id_salt("length_mode")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut settings.measure_from_image_start,
+                                    false,
+                                    "按持有时长重触发",
+                                );
+                                ui.selectable_value(
+                                    &mut settings.measure_from_image_start,
+                                    true,
+                                    "按图像起始网格切分",
+                                );
+                            });
+                    });
                 }
             });
 
             ui.add_space(10.0);
             card(ui, |ui| {
                 section_title(ui, "MIDI 输出");
-                ui.horizontal(|ui| {
-                    ui.label("PPQ");
+                setting_row(ui, "PPQ", |ui| {
                     ui.add(egui::DragValue::new(&mut settings.ppq).range(1..=0x7FFF));
                 });
-                ui.horizontal(|ui| {
-                    ui.label("Ticks / px");
+                setting_row(ui, "Ticks / px", |ui| {
                     ui.add(egui::DragValue::new(&mut settings.ticks_per_pixel).range(1..=0xFFFF));
                 });
-                ui.horizontal(|ui| {
-                    ui.label("BPM");
+                setting_row(ui, "BPM", |ui| {
                     ui.add(egui::DragValue::new(&mut settings.bpm).range(1..=1000));
                 });
-                ui.horizontal(|ui| {
-                    ui.label("起始偏移");
+                setting_row(ui, "起始偏移", |ui| {
                     ui.add(egui::DragValue::new(&mut settings.start_offset).speed(10.0));
                 });
-                ui.checkbox(&mut settings.emit_color_events, "写入颜色 Meta 事件");
+                setting_row(ui, "写入颜色 Meta 事件", |ui| {
+                    ui.add(egui::Checkbox::without_text(
+                        &mut settings.emit_color_events,
+                    ));
+                });
             });
 
             ui.add_space(12.0);
@@ -209,8 +250,6 @@ pub fn show(
                     }
                 }
 
-                let can_export =
-                    preview.is_some_and(|preview| preview.config == settings.conversion_config());
                 let export = egui::Button::new("导出 MIDI…")
                     .min_size(egui::vec2(ui.available_width(), 30.0));
                 if ui.add_enabled(can_export, export).clicked() {
@@ -219,9 +258,11 @@ pub fn show(
             }
 
             ui.add_space(8.0);
-            if ui.button("重置全部参数").clicked() {
-                *settings = Settings::default();
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("重置全部参数").clicked() {
+                    *settings = Settings::default();
+                }
+            });
         });
 
     action

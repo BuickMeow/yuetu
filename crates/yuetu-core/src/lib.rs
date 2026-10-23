@@ -32,7 +32,9 @@ pub mod resize;
 pub use color::Color;
 pub use convert::{ConversionConfig, ConversionResult, convert, convert_with_progress};
 pub use error::{Error, Result};
-pub use image::{RgbaImage, load_image, load_image_from_memory};
+pub use image::{
+    ImageSequence, RgbaImage, load_image, load_image_from_memory, load_image_sequence,
+};
 pub use keymap::{ColumnMapping, KeyFilter, KeyMap, is_white_key, note_name};
 pub use midi::{MidiOutputConfig, write_midi};
 pub use notegen::{generate_notes, generate_notes_with_progress};

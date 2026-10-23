@@ -25,3 +25,14 @@ pub fn section_title(ui: &mut Ui, title: &str) {
     ui.label(RichText::new(title).strong());
     ui.add_space(1.0);
 }
+
+/// One setting row: label on the left, control right-aligned.
+pub fn setting_row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.set_min_width(ui.available_width());
+        ui.label(label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add)
+            .inner
+    })
+    .inner
+}

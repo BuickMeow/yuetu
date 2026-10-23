@@ -44,14 +44,13 @@
 ### 3.1 输入
 
 ```rust
-RgbaImage {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>, // row-major RGBA
+ImageSequence {
+    frames: Vec<RgbaImage>, // 静态图只有一个元素
+    delays_ms: Vec<u32>,    // GIF/WebP 帧延迟
 }
 ```
 
-图片解码只负责得到像素。旋转、翻转、灰度、GIF 拆帧以后都属于“前处理”，但不应塞进 `convert()`。
+图片解码只负责得到像素。旋转、翻转、灰度、GIF/WebP 拆帧和选帧都属于“前处理”，但不应塞进 `convert()`。动画帧在 UI 线程一次性解码并设置内存上限；`convert()` 只接收当前选中的那一帧。
 
 ### 3.2 中间表示
 
@@ -122,8 +121,9 @@ validate config
 `YuetuApp` 只持有一棵状态树：
 
 ```text
-source: Option<SourceImage>   // CPU 全分辨率图 + GPU 显示纹理
-preview: Option<Preview>      // ConversionResult + 产生它的配置
+source: Option<SourceImage>   // 全部帧 + 当前帧 CPU 图 + GPU 显示纹理
+source_revision: u64          // 图片或 GIF 帧变化时递增
+preview: Option<Preview>      // ConversionResult + 配置 + source_revision
 settings: Settings            // UI 参数
 image_view / preview_view     // 两个 View2D
 status / hover                // 一帧内的展示信息
@@ -137,9 +137,11 @@ status / hover                // 一帧内的展示信息
 fn show(ui, 状态引用, 可变 UI 状态) -> Action
 ```
 
-面板不直接改 `YuetuApp` 的全局状态，只返回 `Action { open, cancel, export, fit }`。`app.rs` 统一消费动作，调用文件对话框、取消任务、导出器。
+面板不直接改 `YuetuApp` 的全局状态，只返回 `Action { open, cancel, export, fit, frame }`。`app.rs` 统一消费动作，调用文件对话框、切换 GIF 帧、取消任务、导出器。
 
-转换不再由面板按钮触发。`app.rs` 在每帧 UI 结束后比较 `ConversionConfig`：只要有变化，就经过 80 ms debounce 启动后台任务；拖拽滑杆时不会每帧重启任务，但松手后立即更新。
+设置项统一使用“名称在左、控件右对齐”的行布局，卡片标题与卡片级操作也使用同一行。
+
+转换不再由面板按钮触发。`app.rs` 在每帧 UI 结束后比较 `ConversionConfig`：只要有变化，就经过 80 ms debounce 启动后台任务；GIF/WebP 选帧同样会递增 `source_revision` 并触发更新。拖拽滑杆时不会每帧重启任务，但松手后立即更新。
 
 ### 5.3 后台转换任务
 
@@ -182,6 +184,10 @@ UI: poll_jobs() → 状态栏 + 进度条 + 新 Preview
 
 预览的坐标单位是“列 × pixel-tick”，不是屏幕像素。因此窗口缩放、面板拖拽都不会改变数据坐标。
 
+### 5.6 HiDPI
+
+eframe / egui / wgpu 已经处理窗口的 `pixels_per_point`：布局、字体、描边、命中区和两个 `View2D` 全部使用逻辑点，上传给 GPU 的纹理使用图像实际像素。唯一相关的是从 `ctx.input(|i| i.max_texture_side)` 读取纹理上限，避免超过后端限制。Retina 2x 下已验证。
+
 ---
 
 ## 6. wgpu 当前边界与音符性能
@@ -212,6 +218,7 @@ eframe::Renderer::Wgpu
 
 - [x] 转换移到后台线程：`JobRunner` + `JobEvent` + 分阶段进度 + 协作式取消；
 - [x] 参数变化自动重新生成预览（80 ms debounce，无手动生成按钮）；
+- [x] GIF / 动态 WebP 逐帧选择，切帧自动更新预览；
 - [ ] 颜色拾取：点原图取色，编辑/替换调色板；
 - [ ] 手动调色板 + 自动调色板切换；
 - [ ] 打开最近文件、窗口状态持久化。
@@ -221,7 +228,8 @@ eframe::Renderer::Wgpu
 - 调色板算法：K-Means++、Octree、Median Cut、GMM、DBSCAN、Floyd/Ordered dithering；
 - 缩放算法：Bilinear、Bicubic、Lanczos、Area、Nearest、Mode pooling；
 - 高度模式、黑/白键六种组合、最大音符长度模式；
-- GIF/WebP 帧导航、SVG/PSD/TIFF 等格式；
+- 视频导入与选帧（ffmpeg / 原生解码后端）；
+- SVG/PSD/TIFF 等格式；
 - 批量导出；
 - 中英文界面。
 

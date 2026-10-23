@@ -18,6 +18,8 @@ const AUTO_CONVERT_DEBOUNCE: Duration = Duration::from_millis(80);
 
 pub struct YuetuApp {
     source: Option<SourceImage>,
+    /// Increments whenever the source pixels change (new image or GIF frame).
+    source_revision: u64,
     preview: Option<Preview>,
     settings: Settings,
 
@@ -31,6 +33,7 @@ pub struct YuetuApp {
     jobs: JobRunner,
     job_progress: Option<ProgressView>,
     job_config: Option<ConversionConfig>,
+    job_source_revision: Option<u64>,
     job_started: Option<Instant>,
     /// When the next automatic conversion should start. `None` means no
     /// parameters changed since the last result/job.
@@ -46,6 +49,7 @@ impl YuetuApp {
 
         let mut app = Self {
             source: None,
+            source_revision: 0,
             preview: None,
             settings: Settings::default(),
             image_view: View2D::default(),
@@ -56,6 +60,7 @@ impl YuetuApp {
             jobs: JobRunner::new(),
             job_progress: None,
             job_config: None,
+            job_source_revision: None,
             job_started: None,
             auto_convert_at: None,
             left_panel_width: 310.0,
@@ -85,6 +90,7 @@ impl YuetuApp {
         self.jobs.cancel();
         self.job_progress = None;
         self.job_config = None;
+        self.job_source_revision = None;
         self.job_started = None;
         self.auto_convert_at = None;
 
@@ -95,6 +101,7 @@ impl YuetuApp {
                     source.name, source.image.width, source.image.height
                 ));
                 self.source = Some(source);
+                self.source_revision = self.source_revision.wrapping_add(1);
                 self.preview = None;
                 self.source_hover = None;
                 self.preview_hover = None;
@@ -125,6 +132,7 @@ impl YuetuApp {
         match self.jobs.start(source.image.clone(), config.clone()) {
             Ok(_) => {
                 self.job_config = Some(config);
+                self.job_source_revision = Some(self.source_revision);
                 self.job_started = Some(Instant::now());
                 self.job_progress = Some(ProgressView::new(Stage::Palette, 0.0));
                 self.status = StatusMessage::info("正在生成");
@@ -132,6 +140,10 @@ impl YuetuApp {
             }
             Err(error) => {
                 tracing::warn!("failed to spawn conversion job: {error}");
+                self.job_progress = None;
+                self.job_config = None;
+                self.job_source_revision = None;
+                self.job_started = None;
                 self.status = StatusMessage::error(format!("无法启动转换任务：{error}"));
             }
         }
@@ -163,16 +175,19 @@ impl YuetuApp {
         }
 
         let config = self.settings.conversion_config();
-        // A job for exactly these settings is already doing the work.
-        if self.jobs.is_running() && self.job_config.as_ref() == Some(&config) {
+        // A job for exactly these settings and source frame is already doing
+        // the work.
+        if self.jobs.is_running()
+            && self.job_config.as_ref() == Some(&config)
+            && self.job_source_revision == Some(self.source_revision)
+        {
             return;
         }
         // A finished job already produced this exact result.
         if !self.jobs.is_running()
-            && self
-                .preview
-                .as_ref()
-                .is_some_and(|preview| preview.config == config)
+            && self.preview.as_ref().is_some_and(|preview| {
+                preview.config == config && preview.source_revision == self.source_revision
+            })
         {
             return;
         }
@@ -188,6 +203,7 @@ impl YuetuApp {
         self.jobs.cancel();
         self.job_progress = None;
         self.job_config = None;
+        self.job_source_revision = None;
         self.job_started = None;
         self.status = StatusMessage::warning("已取消生成");
     }
@@ -213,10 +229,11 @@ impl YuetuApp {
                         .map(|started| started.elapsed())
                         .unwrap_or_default();
                     let config = self.job_config.take().unwrap_or_default();
+                    let source_revision = self.job_source_revision.take().unwrap_or_default();
                     let current = self.settings.conversion_config();
                     let had_preview = self.preview.is_some();
                     self.job_progress = None;
-                    if config == current {
+                    if config == current && source_revision == self.source_revision {
                         self.status = StatusMessage::success(format!(
                             "生成完成：{} 音符 · {} 音轨 · 用时 {:.1} ms",
                             result.note_count(),
@@ -226,7 +243,11 @@ impl YuetuApp {
                     } else {
                         self.status = StatusMessage::info("正在更新预览…");
                     }
-                    self.preview = Some(Preview { result, config });
+                    self.preview = Some(Preview {
+                        result,
+                        config,
+                        source_revision,
+                    });
                     // Auto updates should keep the user's zoom/pan; only fit a
                     // newly displayed preview.
                     if !had_preview {
@@ -236,6 +257,7 @@ impl YuetuApp {
                 JobEvent::Failed { message, .. } => {
                     self.job_progress = None;
                     self.job_config = None;
+                    self.job_source_revision = None;
                     self.job_started = None;
                     tracing::warn!("conversion failed: {message}");
                     self.status = StatusMessage::error(format!("转换失败：{message}"));
@@ -243,6 +265,7 @@ impl YuetuApp {
                 JobEvent::Cancelled { .. } => {
                     self.job_progress = None;
                     self.job_config = None;
+                    self.job_source_revision = None;
                     self.job_started = None;
                     self.status = StatusMessage::warning("已取消生成");
                 }
@@ -259,7 +282,9 @@ impl YuetuApp {
             self.status = StatusMessage::warning("暂无可导出的预览");
             return;
         };
-        if preview.config != self.settings.conversion_config() {
+        if preview.config != self.settings.conversion_config()
+            || preview.source_revision != self.source_revision
+        {
             self.status = StatusMessage::warning("预览正在更新，请稍候");
             return;
         }
@@ -325,9 +350,9 @@ impl YuetuApp {
 
     fn preview_is_current(&self) -> bool {
         let config = self.settings.conversion_config();
-        self.preview
-            .as_ref()
-            .is_some_and(|preview| preview.config == config)
+        self.preview.as_ref().is_some_and(|preview| {
+            preview.config == config && preview.source_revision == self.source_revision
+        })
     }
 
     fn clamp_panel_widths(&mut self, total_width: f32) {
@@ -381,6 +406,7 @@ impl eframe::App for YuetuApp {
             });
 
         let mut controls_action = ui::controls::Action::default();
+        let can_export = self.preview_is_current();
         let left_panel = egui::Panel::left("controls")
             .exact_size(self.left_panel_width)
             .resizable(false)
@@ -394,6 +420,7 @@ impl eframe::App for YuetuApp {
                     self.preview.as_ref(),
                     self.jobs.is_running(),
                     self.job_progress.as_ref(),
+                    can_export,
                 );
             });
         let left_rect = left_panel.response.rect;
@@ -471,6 +498,24 @@ impl eframe::App for YuetuApp {
             self.open_dialog(&ctx);
             acted = true;
         }
+        if let Some(frame) = controls_action.frame {
+            if let Some(source) = self.source.as_mut() {
+                match source.select_frame(&ctx, frame) {
+                    Ok(true) => {
+                        self.source_revision = self.source_revision.wrapping_add(1);
+                        self.source_hover = None;
+                        self.preview_hover = None;
+                        self.status = StatusMessage::info("正在更新预览…");
+                        self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+                        acted = true;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.status = StatusMessage::error(format!("切换帧失败：{error}"));
+                    }
+                }
+            }
+        }
         if toolbar_action.export || controls_action.export {
             self.export_dialog();
             acted = true;
@@ -486,6 +531,7 @@ impl eframe::App for YuetuApp {
         }
 
         if self.source.is_some() && self.settings.conversion_config() != config_before {
+            self.status = StatusMessage::info("正在更新预览…");
             self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
             acted = true;
         }
