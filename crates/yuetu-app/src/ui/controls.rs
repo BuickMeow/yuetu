@@ -2,9 +2,9 @@ use egui::{RichText, Ui};
 
 use crate::jobs::ProgressView;
 use crate::settings::Settings;
-use crate::state::{Preview, SourceImage};
+use crate::state::{PipelineStage, Preview, SourceImage, StageStop};
 use crate::theme;
-use crate::ui::{card, section_title, setting_row};
+use crate::ui::{card_with_rect, section_title, setting_row};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Action {
@@ -12,6 +12,11 @@ pub struct Action {
     pub cancel: bool,
     pub export: bool,
     pub frame: Option<usize>,
+}
+
+pub struct Output {
+    pub action: Action,
+    pub stops: Vec<StageStop>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -23,13 +28,14 @@ pub fn show(
     is_running: bool,
     progress: Option<&ProgressView>,
     can_export: bool,
-) -> Action {
+) -> Output {
     let mut action = Action::default();
+    let mut stops = Vec::with_capacity(4);
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            card(ui, |ui| {
+            let (_, rect) = card_with_rect(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("源图").strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -72,9 +78,13 @@ pub fn show(
                     ui.label("尚未打开图片");
                 }
             });
+            stops.push(StageStop {
+                stage: PipelineStage::Source,
+                center_y: rect.center().y,
+            });
 
             ui.add_space(10.0);
-            card(ui, |ui| {
+            let (_, rect) = card_with_rect(ui, |ui| {
                 section_title(ui, "键位映射");
                 setting_row(ui, "起始键", |ui| {
                     ui.add(
@@ -132,18 +142,7 @@ pub fn show(
                             );
                         });
                 });
-            });
 
-            ui.add_space(10.0);
-            card(ui, |ui| {
-                section_title(ui, "调色板与缩放");
-                setting_row(ui, "颜色数", |ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut settings.palette_colors)
-                            .range(1..=256)
-                            .speed(1.0),
-                    );
-                });
                 setting_row(ui, "缩放算法", |ui| {
                     egui::ComboBox::from_id_salt("resize_algorithm")
                         .selected_text(settings.resize.label())
@@ -160,16 +159,37 @@ pub fn show(
                             );
                         });
                 });
+            });
+            stops.push(StageStop {
+                stage: PipelineStage::KeyMap,
+                center_y: rect.center().y,
+            });
+
+            ui.add_space(10.0);
+            let (_, rect) = card_with_rect(ui, |ui| {
+                section_title(ui, "调色板");
+                setting_row(ui, "颜色数", |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut settings.palette_colors)
+                            .range(1..=256)
+                            .speed(1.0),
+                    );
+                });
 
                 if let Some(preview) = preview {
                     ui.add_space(4.0);
                     palette_swatches(ui, preview);
                 }
             });
+            stops.push(StageStop {
+                stage: PipelineStage::Palette,
+                center_y: rect.center().y,
+            });
 
             ui.add_space(10.0);
-            card(ui, |ui| {
-                section_title(ui, "音符长度");
+            let (_, rect) = card_with_rect(ui, |ui| {
+                section_title(ui, "MIDI 输出");
+
                 setting_row(ui, "限制最大音符长度", |ui| {
                     ui.add(egui::Checkbox::without_text(
                         &mut settings.limit_note_length,
@@ -205,11 +225,7 @@ pub fn show(
                             });
                     });
                 }
-            });
 
-            ui.add_space(10.0);
-            card(ui, |ui| {
-                section_title(ui, "MIDI 输出");
                 setting_row(ui, "PPQ", |ui| {
                     ui.add(egui::DragValue::new(&mut settings.ppq).range(1..=0x7FFF));
                 });
@@ -227,6 +243,10 @@ pub fn show(
                         &mut settings.emit_color_events,
                     ));
                 });
+            });
+            stops.push(StageStop {
+                stage: PipelineStage::Midi,
+                center_y: rect.center().y,
             });
 
             ui.add_space(12.0);
@@ -265,7 +285,7 @@ pub fn show(
             });
         });
 
-    action
+    Output { action, stops }
 }
 
 fn palette_swatches(ui: &mut Ui, preview: &Preview) {

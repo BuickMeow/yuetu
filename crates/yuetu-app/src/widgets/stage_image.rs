@@ -1,0 +1,205 @@
+//! Raster pipeline-stage view with Photoshop-style pixel rulers.
+
+use egui::{Color32, CursorIcon, FontId, Rect, Stroke, StrokeKind, Ui};
+
+use crate::theme;
+use crate::widgets::view2d::View2D;
+
+#[derive(Clone, Copy, Debug)]
+pub struct RasterHover {
+    /// Full-resolution pixel coordinate inside this stage image.
+    pub x: u32,
+    pub y: u32,
+}
+
+pub fn show(
+    ui: &mut Ui,
+    view: &mut View2D,
+    texture: egui::TextureId,
+    content_size: (u32, u32),
+    checkerboard: bool,
+) -> Option<RasterHover> {
+    let size = egui::vec2(content_size.0.max(1) as f32, content_size.1.max(1) as f32);
+    let interaction = view.interact(ui, size, CursorIcon::Crosshair);
+    let painter = ui.painter_at(interaction.viewport);
+
+    painter.rect_filled(interaction.viewport, 0.0, theme::view_bg(ui));
+    if checkerboard {
+        draw_checkerboard(&painter, interaction.content_rect, ui.visuals());
+    }
+
+    painter.image(
+        texture,
+        interaction.content_rect,
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+
+    let hovered = interaction.hover_uv().map(|uv| RasterHover {
+        x: ((uv.x * content_size.0 as f32).floor() as u32).min(content_size.0.saturating_sub(1)),
+        y: ((uv.y * content_size.1 as f32).floor() as u32).min(content_size.1.saturating_sub(1)),
+    });
+
+    if let Some(hover) = hovered {
+        if interaction.scale >= 4.0 {
+            let min = egui::pos2(
+                interaction.content_rect.left() + hover.x as f32 * interaction.scale,
+                interaction.content_rect.top() + hover.y as f32 * interaction.scale,
+            );
+            let rect = Rect::from_min_size(min, egui::vec2(interaction.scale, interaction.scale));
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0, theme::accent(ui)),
+                StrokeKind::Inside,
+            );
+        }
+    }
+
+    draw_rulers(ui, &painter, &interaction, content_size);
+    hovered
+}
+
+fn draw_checkerboard(painter: &egui::Painter, rect: Rect, visuals: &egui::Visuals) {
+    let cell = 12.0;
+    let light = visuals.faint_bg_color;
+    let cols = (rect.width() / cell).ceil() as i32;
+    let rows = (rect.height() / cell).ceil() as i32;
+    for y in 0..rows {
+        for x in 0..cols {
+            if (x + y) % 2 != 0 {
+                continue;
+            }
+            let min = egui::pos2(rect.left() + x as f32 * cell, rect.top() + y as f32 * cell);
+            let max = egui::pos2(
+                (min.x + cell).min(rect.right()),
+                (min.y + cell).min(rect.bottom()),
+            );
+            painter.rect_filled(Rect::from_min_max(min, max), 0.0, light);
+        }
+    }
+}
+
+fn draw_rulers(
+    ui: &Ui,
+    painter: &egui::Painter,
+    interaction: &crate::widgets::view2d::ViewInteraction,
+    content_size: (u32, u32),
+) {
+    if interaction.scale <= 1e-6 {
+        return;
+    }
+
+    const TOP: f32 = 17.0;
+    const LEFT: f32 = 28.0;
+    let viewport = interaction.viewport;
+    if viewport.width() <= LEFT + 4.0 || viewport.height() <= TOP + 4.0 {
+        return;
+    }
+
+    let top_band = Rect::from_min_max(
+        viewport.min,
+        egui::pos2(viewport.right(), viewport.top() + TOP),
+    );
+    let left_band = Rect::from_min_max(
+        egui::pos2(viewport.left(), viewport.top() + TOP),
+        egui::pos2(viewport.left() + LEFT, viewport.bottom()),
+    );
+    painter.rect_filled(top_band, 0.0, ui.visuals().panel_fill);
+    painter.rect_filled(left_band, 0.0, ui.visuals().panel_fill);
+
+    let edge = theme::faint(ui).gamma_multiply(0.45);
+    painter.line_segment(
+        [
+            egui::pos2(viewport.left(), viewport.top() + TOP),
+            egui::pos2(viewport.right(), viewport.top() + TOP),
+        ],
+        Stroke::new(1.0, edge),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(viewport.left() + LEFT, viewport.top() + TOP),
+            egui::pos2(viewport.left() + LEFT, viewport.bottom()),
+        ],
+        Stroke::new(1.0, edge),
+    );
+
+    let step = ruler_step(interaction.scale);
+    let tick_color = theme::muted(ui).gamma_multiply(0.75);
+    let label_color = theme::faint(ui);
+    let font = FontId::monospace(9.0);
+
+    let content = interaction.content_rect;
+    let first_x =
+        (((viewport.left() - content.left()) / interaction.scale).floor()).max(0.0) as u32;
+    let last_x = (((viewport.right() - content.left()) / interaction.scale).ceil())
+        .clamp(0.0, content_size.0 as f32) as u32;
+    let start_x = (first_x / step) * step;
+    let mut x = start_x;
+    while x <= last_x {
+        let sx = content.left() + x as f32 * interaction.scale;
+        if sx >= viewport.left() + LEFT && sx <= viewport.right() {
+            painter.line_segment(
+                [
+                    egui::pos2(sx, viewport.top() + TOP - 4.0),
+                    egui::pos2(sx, viewport.top() + TOP),
+                ],
+                Stroke::new(1.0, tick_color),
+            );
+            if sx + 30.0 <= viewport.right() {
+                painter.text(
+                    egui::pos2(sx + 2.0, viewport.top() + 1.0),
+                    egui::Align2::LEFT_TOP,
+                    x.to_string(),
+                    font.clone(),
+                    label_color,
+                );
+            }
+        }
+        x = x.saturating_add(step);
+    }
+
+    let first_y = (((viewport.top() - content.top()) / interaction.scale).floor()).max(0.0) as u32;
+    let last_y = (((viewport.bottom() - content.top()) / interaction.scale).ceil())
+        .clamp(0.0, content_size.1 as f32) as u32;
+    let start_y = (first_y / step) * step;
+    let mut y = start_y;
+    while y <= last_y {
+        let sy = content.top() + y as f32 * interaction.scale;
+        if sy >= viewport.top() + TOP && sy <= viewport.bottom() {
+            painter.line_segment(
+                [
+                    egui::pos2(viewport.left() + LEFT - 4.0, sy),
+                    egui::pos2(viewport.left() + LEFT, sy),
+                ],
+                Stroke::new(1.0, tick_color),
+            );
+            if sy + 12.0 <= viewport.bottom() {
+                painter.text(
+                    egui::pos2(viewport.left() + LEFT - 4.0, sy + 1.0),
+                    egui::Align2::RIGHT_TOP,
+                    y.to_string(),
+                    font.clone(),
+                    label_color,
+                );
+            }
+        }
+        y = y.saturating_add(step);
+    }
+}
+
+fn ruler_step(scale: f32) -> u32 {
+    let target = 72.0 / scale.max(1e-6);
+    let power = 10f32.powf(target.log10().floor());
+    let ratio = target / power;
+    let multiplier = if ratio <= 1.0 {
+        1.0
+    } else if ratio <= 2.0 {
+        2.0
+    } else if ratio <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    (power * multiplier).max(1.0).round() as u32
+}

@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use yuetu_core::resize::resize;
 use yuetu_core::{
-    Color, ConversionConfig, ConversionResult, ResizeAlgorithm, RgbaImage, load_image_sequence,
+    Color, ConversionConfig, ConversionResult, IndexedImage, Palette, ResizeAlgorithm, RgbaImage,
+    load_image_sequence,
 };
 
 /// Longest side of the texture uploaded to the GPU. The conversion still uses
@@ -20,8 +21,6 @@ pub struct SourceImage {
     frames: Vec<Arc<RgbaImage>>,
     frame_index: usize,
     pub texture: TextureHandle,
-    /// Dimensions of the (possibly downscaled) texture.
-    pub texture_size: (u32, u32),
 }
 
 impl SourceImage {
@@ -30,7 +29,7 @@ impl SourceImage {
         let frames: Vec<Arc<RgbaImage>> = sequence.frames.into_iter().map(Arc::new).collect();
         let image = frames[0].clone();
         let texture_name = format!("source:{}:0", path.display());
-        let (texture, texture_size) = upload_texture(ctx, &texture_name, &image)?;
+        let texture = upload_texture(ctx, &texture_name, &image)?;
 
         let name = path
             .file_name()
@@ -44,7 +43,6 @@ impl SourceImage {
             image,
             frames,
             frame_index: 0,
-            texture_size,
             texture,
         })
     }
@@ -68,24 +66,11 @@ impl SourceImage {
 
         let image = self.frames[index].clone();
         let texture_name = format!("source:{}:{index}", self.path.display());
-        let (texture, texture_size) = upload_texture(ctx, &texture_name, &image)?;
+        let texture = upload_texture(ctx, &texture_name, &image)?;
         self.image = image;
         self.frame_index = index;
         self.texture = texture;
-        self.texture_size = texture_size;
         Ok(true)
-    }
-
-    /// Map a pixel in the display texture back to the full-resolution image.
-    pub fn source_pixel(&self, x: u32, y: u32) -> (u32, u32) {
-        let sx = (u64::from(x) * u64::from(self.image.width)
-            / u64::from(self.texture_size.0.max(1))) as u32;
-        let sy = (u64::from(y) * u64::from(self.image.height)
-            / u64::from(self.texture_size.1.max(1))) as u32;
-        (
-            sx.min(self.image.width.saturating_sub(1)),
-            sy.min(self.image.height.saturating_sub(1)),
-        )
     }
 }
 
@@ -93,7 +78,7 @@ fn upload_texture(
     ctx: &egui::Context,
     name: &str,
     image: &RgbaImage,
-) -> yuetu_core::Result<(TextureHandle, (u32, u32))> {
+) -> yuetu_core::Result<TextureHandle> {
     // Never assume 4096: some backends (and egui's defaults) cap at 2048.
     // Loading a larger texture is a debug assertion/panic inside egui.
     let max_texture_side = ctx
@@ -123,8 +108,54 @@ fn upload_texture(
         wrap_mode: TextureWrapMode::ClampToEdge,
         mipmap_mode: None,
     };
-    let texture = ctx.load_texture(name, color_image, options);
-    Ok((texture, (display.width, display.height)))
+    Ok(ctx.load_texture(name, color_image, options))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PipelineStage {
+    #[default]
+    Source,
+    KeyMap,
+    Palette,
+    Midi,
+}
+
+impl PipelineStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Source => "源图",
+            Self::KeyMap => "键位映射",
+            Self::Palette => "调色板",
+            Self::Midi => "MIDI 输出",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct StageStop {
+    pub stage: PipelineStage,
+    pub center_y: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum StageHover {
+    Source {
+        pos: (u32, u32),
+        color: Color,
+    },
+    KeyMap {
+        pos: (u32, u32),
+        color: Color,
+        key: Option<u8>,
+    },
+    Palette {
+        index: i32,
+        color: Color,
+    },
+    Midi {
+        key: u8,
+        tick: u32,
+    },
 }
 
 pub struct Preview {
@@ -134,6 +165,47 @@ pub struct Preview {
     pub config: ConversionConfig,
     /// Source generation, so selecting another GIF frame also invalidates it.
     pub source_revision: u64,
+    /// Display texture for the resized (key-mapped) image.
+    pub resized_texture: TextureHandle,
+    /// Display texture for the palette-indexed image.
+    pub indexed_texture: TextureHandle,
+}
+
+impl Preview {
+    pub fn new(
+        ctx: &egui::Context,
+        result: ConversionResult,
+        config: ConversionConfig,
+        source_revision: u64,
+    ) -> yuetu_core::Result<Self> {
+        let resized_name = format!("stage:resized:{source_revision}");
+        let resized_texture = upload_texture(ctx, &resized_name, &result.resized_image)?;
+
+        let indexed_rgba = indexed_to_rgba(&result.indexed_image, &result.palette)?;
+        let indexed_name = format!("stage:indexed:{source_revision}");
+        let indexed_texture = upload_texture(ctx, &indexed_name, &indexed_rgba)?;
+
+        Ok(Self {
+            result,
+            config,
+            source_revision,
+            resized_texture,
+            indexed_texture,
+        })
+    }
+}
+
+fn indexed_to_rgba(indexed: &IndexedImage, palette: &Palette) -> yuetu_core::Result<RgbaImage> {
+    let mut pixels = vec![0u8; indexed.width as usize * indexed.height as usize * 4];
+    for (pixel, &index) in pixels.chunks_exact_mut(4).zip(&indexed.indices) {
+        if index < 0 {
+            continue;
+        }
+        if let Some(color) = palette.colors.get(index as usize) {
+            pixel.copy_from_slice(&[color.r, color.g, color.b, color.a]);
+        }
+    }
+    RgbaImage::from_rgba(indexed.width, indexed.height, pixels)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,17 +256,4 @@ impl Default for StatusMessage {
     fn default() -> Self {
         Self::info("就绪")
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct SourceHover {
-    pub texture_pos: (u32, u32),
-    pub source_pos: (u32, u32),
-    pub color: Color,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct PreviewHover {
-    pub key: u8,
-    pub tick: u32,
 }

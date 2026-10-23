@@ -7,12 +7,12 @@
 use egui::{Color32, CursorIcon, FontId, Rect, Stroke, Ui};
 use yuetu_core::{ConversionResult, is_white_key, note_name};
 
-use crate::state::PreviewHover;
+use crate::state::StageHover;
 use crate::theme;
 use crate::widgets::view2d::View2D;
 
 pub struct PreviewOutput {
-    pub hovered: Option<PreviewHover>,
+    pub hovered: Option<StageHover>,
 }
 
 pub fn show(ui: &mut Ui, result: &ConversionResult, view: &mut View2D) -> PreviewOutput {
@@ -189,7 +189,7 @@ pub fn show(ui: &mut Ui, result: &ConversionResult, view: &mut View2D) -> Previe
         let tick = ((content.bottom() - pointer.y) / scale.max(1e-6)).floor() as i32;
         if column >= 0 && tick >= 0 {
             if let Some(key) = keymap.key_at(column as u32) {
-                hovered = Some(PreviewHover {
+                hovered = Some(StageHover::Midi {
                     key,
                     tick: (tick as u32).min(result.duration_px),
                 });

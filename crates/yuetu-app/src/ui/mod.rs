@@ -1,23 +1,21 @@
 pub mod controls;
-pub mod preview_panel;
-pub mod source_panel;
+pub mod stage_panel;
 pub mod status_bar;
 pub mod toolbar;
 
-use egui::{RichText, Ui};
+use egui::{Rect, RichText, Ui};
 
 use crate::theme;
 
-pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+pub fn card_with_rect<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
     let outer_width = ui.available_width();
-    theme::card_frame(ui)
-        .show(ui, |ui| {
-            // Frame margins are 10 px on each side; force every sidebar card
-            // to the same outer width regardless of its content.
-            ui.set_min_width((outer_width - 20.0).max(1.0));
-            add(ui)
-        })
-        .inner
+    let response = theme::card_frame(ui).show(ui, |ui| {
+        // Frame margins are 10 px on each side; force every sidebar card
+        // to the same outer width regardless of its content.
+        ui.set_min_width((outer_width - 20.0).max(1.0));
+        add(ui)
+    });
+    (response.inner, response.response.rect)
 }
 
 pub fn section_title(ui: &mut Ui, title: &str) {

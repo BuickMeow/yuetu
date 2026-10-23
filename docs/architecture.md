@@ -75,6 +75,8 @@ ConversionResult {
     keymap: KeyMap,
     duration_px: u32,
     source_size / resized_size,
+    resized_image: RgbaImage,  // 键位映射阶段的图片
+    indexed_image: IndexedImage, // 调色板阶段的索引色图
     note_count_by_track,
 }
 ```
@@ -123,9 +125,11 @@ validate config
 ```text
 source: Option<SourceImage>   // 全部帧 + 当前帧 CPU 图 + GPU 显示纹理
 source_revision: u64          // 图片或 GIF 帧变化时递增
-preview: Option<Preview>      // ConversionResult + 配置 + source_revision
+preview: Option<Preview>      // ConversionResult + 配置 + 阶段纹理
 settings: Settings            // UI 参数
-image_view / preview_view     // 两个 View2D
+stage: PipelineStage          // 当前流水线阶段
+stage_stops                   // 左侧卡片中心，供圆点吸附
+source/key/palette/midi_view  // 每个阶段独立的 View2D
 status / hover                // 一帧内的展示信息
 ```
 
@@ -137,9 +141,9 @@ status / hover                // 一帧内的展示信息
 fn show(ui, 状态引用, 可变 UI 状态) -> Action
 ```
 
-面板不直接改 `YuetuApp` 的全局状态，只返回 `Action { open, cancel, export, fit, frame }`。`app.rs` 统一消费动作，调用文件对话框、切换 GIF 帧、取消任务、导出器。
+面板不直接改 `YuetuApp` 的全局状态，只返回动作或绘制信息。`app.rs` 统一消费动作，调用文件对话框、切换 GIF 帧、取消任务、导出器。
 
-设置项统一使用“名称在左、控件右对齐”的行布局，卡片标题与卡片级操作也使用同一行。
+设置项统一使用“名称在左、控件右对齐”的行布局，卡片标题与卡片级操作也使用同一行。`controls::show` 返回四个卡片的屏幕中心，供最左侧流水线轨道吸附。
 
 转换不再由面板按钮触发。`app.rs` 在每帧 UI 结束后比较 `ConversionConfig`：只要有变化，就经过 80 ms debounce 启动后台任务；GIF/WebP 选帧同样会递增 `source_revision` 并触发更新。拖拽滑杆时不会每帧重启任务，但松手后立即更新。
 
@@ -162,7 +166,7 @@ UI: poll_jobs() → 状态栏 + 进度条 + 新 Preview
 - 进度按 stage 加权成 0–100%，而不是把不同阶段的 0–1 直接混在一起；
 - 同一时间只跑一个任务；启动新任务会取消旧任务，并按 job id 丢弃旧事件；
 - 参数变化会自动把新任务排到 80 ms 后；旧结果即使先返回，也只会短暂作为占位，更新状态由进度条表示，不再出现“预览已过期”；
-- 导出的前提是 `Preview.config == 当前 ConversionConfig`，避免在自动更新途中导出旧结果。
+- 导出的前提是 `Preview.config == 当前 ConversionConfig` 且 `Preview.source_revision == 当前 source_revision`，避免在自动更新或切帧途中导出旧结果。
 
 ### 5.4 主题开关
 
@@ -173,20 +177,31 @@ UI: poll_jobs() → 状态栏 + 进度条 + 新 Preview
 
 面板、卡片、视图不直接写自定义色值，只调用 `theme::panel_frame` / `card_frame` / `view_frame` 和颜色辅助函数。这样主题切换不影响任何布局逻辑，也方便后面做真正的主题选择器。
 
-### 5.5 两个 View2D
+### 5.5 一个视图，四个 View2D 状态
 
-图片视图和预览视图共用同一套缩放/平移数学：
+界面上只有一个中央视图，但 `Source` / `KeyMap` / `Palette` / `Midi` 各保留自己的缩放/平移状态，切阶段不会丢失视角：
 
 - 滚轮 / 捏合：以鼠标位置为中心缩放；
-- 左键拖拽：平移；
+- 左键拖拽 / 触控板双指：平移；
 - 双击：适配窗口；
-- `fit` 是“相对缩放 1.0”，UI 状态栏显示百分比。
+- `fit` 是“相对缩放 1.0”，状态栏显示当前阶段和百分比。
 
-预览的坐标单位是“列 × pixel-tick”，不是屏幕像素。因此窗口缩放、面板拖拽都不会改变数据坐标。
+MIDI 阶段的坐标单位是“列 × pixel-tick”，不是屏幕像素；因此窗口缩放、面板拖拽都不会改变数据坐标。
 
-### 5.6 HiDPI
+### 5.6 流水线阶段与轨道
 
-eframe / egui / wgpu 已经处理窗口的 `pixels_per_point`：布局、字体、描边、命中区和两个 `View2D` 全部使用逻辑点，上传给 GPU 的纹理使用图像实际像素。唯一相关的是从 `ctx.input(|i| i.max_texture_side)` 读取纹理上限，避免超过后端限制。Retina 2x 下已验证。
+四个阶段由左侧卡片定义：
+
+1. `源图`：原始图像 + Photoshop 风格像素标尺；
+2. `键位映射`：按 `KeyMap::width()` 缩放后的图片，保持宽高比；
+3. `调色板`：`IndexedImage` 按调色板还原成索引色图，悬停显示索引和色号；
+4. `MIDI 输出`：钢琴卷帘音符；音符长度/切分设置也归入这一阶段。
+
+最左侧保留 26px 轨道，圆点只绘制在四个卡片中心。拖拽时按指针 y 找最近卡片中心并吸附，不会停在卡片之间。每个阶段的标尺/视图都由 `stage_panel` 选择，中央视图不需要知道转换细节。
+
+### 5.7 HiDPI
+
+eframe / egui / wgpu 已经处理窗口的 `pixels_per_point`：布局、字体、描边、标尺、命中区和四个 `View2D` 全部使用逻辑点，上传给 GPU 的纹理使用图像实际像素。唯一相关的是从 `ctx.input(|i| i.max_texture_side)` 读取纹理上限，避免超过后端限制。Retina 2x 下已验证。
 
 ---
 
@@ -195,11 +210,11 @@ eframe / egui / wgpu 已经处理窗口的 `pixels_per_point`：布局、字体�
 ```text
 eframe::Renderer::Wgpu
   ├─ egui 全部 UI 的三角形上传 / 绘制
-  ├─ 原图：egui::TextureHandle → wgpu 纹理
+  ├─ 源图 / 键位图 / 索引色图：egui::TextureHandle → wgpu 纹理
   └─ MIDI 预览：egui::Mesh（一个批次）→ wgpu
 ```
 
-目前没有自定义 wgpu pipeline。音符先合并成单个 `egui::Mesh`，避免“每个音符一个 Shape + 一次 tessellation”的 CPU 开销。GPU 填充这些矩形本身很便宜；真正的瓶颈会先出现在 CPU 生成顶点和每帧上传顶点。
+目前没有自定义 wgpu pipeline。阶段纹理在每次转换完成时生成一次，切换阶段只切纹理/视图状态；音符合并成单个 `egui::Mesh`，避免“每个音符一个 Shape + 一次 tessellation”的 CPU 开销。GPU 填充这些矩形本身很便宜；真正的瓶颈会先出现在 CPU 生成顶点和每帧上传顶点。
 
 当音符数量达到数十万、或需要 LOD/GPU culling 时，再把 `midi_preview` 换成自定义 `egui_wgpu::Callback`：
 
@@ -219,6 +234,7 @@ eframe::Renderer::Wgpu
 - [x] 转换移到后台线程：`JobRunner` + `JobEvent` + 分阶段进度 + 协作式取消；
 - [x] 参数变化自动重新生成预览（80 ms debounce，无手动生成按钮）；
 - [x] GIF / 动态 WebP 逐帧选择，切帧自动更新预览；
+- [x] 左侧流水线圆点 + 四阶段中央视图（源图/键位/索引色/MIDI）；
 - [ ] 颜色拾取：点原图取色，编辑/替换调色板；
 - [ ] 手动调色板 + 自动调色板切换；
 - [ ] 打开最近文件、窗口状态持久化。

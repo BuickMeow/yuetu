@@ -1,16 +1,15 @@
 use egui::{RichText, Ui};
-use yuetu_core::note_name;
+use yuetu_core::{Color, note_name};
 
-use crate::state::{PreviewHover, SourceHover, StatusKind, StatusMessage};
+use crate::state::{PipelineStage, StageHover, StatusKind, StatusMessage};
 use crate::theme;
 
 pub fn show(
     ui: &mut Ui,
     status: &StatusMessage,
-    source_hover: Option<SourceHover>,
-    preview_hover: Option<PreviewHover>,
-    image_zoom: f32,
-    preview_zoom: f32,
+    stage: PipelineStage,
+    hover: Option<StageHover>,
+    zoom: f32,
 ) {
     let status_color = match status.kind {
         StatusKind::Info => theme::muted(ui),
@@ -25,33 +24,41 @@ pub fn show(
         ui.label(RichText::new(status.text.as_str()).color(status_color));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(format!("预览 {}", zoom_label(preview_zoom)));
-            ui.add_space(10.0);
-            ui.label(format!("原图 {}", zoom_label(image_zoom)));
+            ui.label(format!("{} {}", stage.label(), zoom_label(zoom)));
 
-            if let Some(hover) = source_hover {
+            if let Some(hover) = hover {
                 ui.add_space(10.0);
-                let color = egui::Color32::from_rgba_unmultiplied(
-                    hover.color.r,
-                    hover.color.g,
-                    hover.color.b,
-                    hover.color.a,
-                );
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, color);
-                ui.label(format!(
-                    "({}, {}) {}",
-                    hover.source_pos.0,
-                    hover.source_pos.1,
-                    hover.color.hex()
-                ));
-            } else if let Some(hover) = preview_hover {
-                ui.add_space(10.0);
-                ui.label(format!("{} · tick {}", note_name(hover.key), hover.tick));
+                match hover {
+                    StageHover::Source { pos, color } => {
+                        color_swatch(ui, color);
+                        ui.label(format!("({}, {}) {}", pos.0, pos.1, color.hex()));
+                    }
+                    StageHover::KeyMap { pos, color, key } => {
+                        color_swatch(ui, color);
+                        let mapped = key.map(note_name).unwrap_or_else(|| "静音".to_owned());
+                        ui.label(format!("({}, {}) · {}", pos.0, pos.1, mapped));
+                    }
+                    StageHover::Palette { index, color } => {
+                        color_swatch(ui, color);
+                        if index < 0 {
+                            ui.label(format!("索引 {index} · 静音"));
+                        } else {
+                            ui.label(format!("索引 {index} · {}", color.hex()));
+                        }
+                    }
+                    StageHover::Midi { key, tick } => {
+                        ui.label(format!("{} · tick {}", note_name(key), tick));
+                    }
+                }
             }
         });
     });
+}
+
+fn color_swatch(ui: &mut Ui, color: Color) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+    let color = egui::Color32::from_rgba_unmultiplied(color.r, color.g, color.b, color.a);
+    ui.painter().rect_filled(rect, 2.0, color);
 }
 
 fn zoom_label(zoom: f32) -> String {

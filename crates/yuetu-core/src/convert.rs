@@ -13,7 +13,7 @@ use crate::keymap::{ColumnMapping, KeyFilter, KeyMap};
 use crate::notegen::{Note, generate_notes_with_progress};
 use crate::palette::Palette;
 use crate::progress::{Progress, Stage, report};
-use crate::quantize::quantize_with_progress;
+use crate::quantize::{IndexedImage, quantize_with_progress};
 use crate::resize::{ResizeAlgorithm, resize};
 
 /// Everything that affects the *preview* (not MIDI timing).
@@ -65,6 +65,10 @@ pub struct ConversionResult {
     pub duration_px: u32,
     pub source_size: (u32, u32),
     pub resized_size: (u32, u32),
+    /// The image after the key-map width resize, kept for pipeline previews.
+    pub resized_image: RgbaImage,
+    /// The nearest-palette-color index for every resized pixel.
+    pub indexed_image: IndexedImage,
     pub note_count_by_track: Vec<usize>,
 }
 
@@ -187,6 +191,8 @@ pub fn convert_with_progress(
         duration_px: target_height,
         source_size: (image.width, image.height),
         resized_size: (target_width, target_height),
+        resized_image: resized,
+        indexed_image: indexed,
         note_count_by_track,
     })
 }

@@ -6,10 +6,10 @@ use yuetu_core::{ConversionConfig, Stage};
 
 use crate::jobs::{JobEvent, JobRunner, ProgressView};
 use crate::settings::Settings;
-use crate::state::{Preview, PreviewHover, SourceHover, SourceImage, StatusMessage};
+use crate::state::{PipelineStage, Preview, SourceImage, StageHover, StageStop, StatusMessage};
 use crate::theme;
 use crate::ui;
-use crate::widgets::{View2D, split_handle};
+use crate::widgets::{View2D, split_handle, stage_rail};
 
 /// Wait this long after the last parameter edit before starting a new job.
 /// It keeps a slider drag from spawning one conversion per frame while still
@@ -23,12 +23,15 @@ pub struct YuetuApp {
     preview: Option<Preview>,
     settings: Settings,
 
-    image_view: View2D,
-    preview_view: View2D,
+    stage: PipelineStage,
+    stage_stops: Vec<StageStop>,
+    stage_hover: Option<StageHover>,
+    source_view: View2D,
+    key_view: View2D,
+    palette_view: View2D,
+    midi_view: View2D,
 
     status: StatusMessage,
-    source_hover: Option<SourceHover>,
-    preview_hover: Option<PreviewHover>,
 
     jobs: JobRunner,
     job_progress: Option<ProgressView>,
@@ -40,7 +43,6 @@ pub struct YuetuApp {
     auto_convert_at: Option<Instant>,
 
     left_panel_width: f32,
-    right_panel_width: f32,
 }
 
 impl YuetuApp {
@@ -52,11 +54,14 @@ impl YuetuApp {
             source_revision: 0,
             preview: None,
             settings: Settings::default(),
-            image_view: View2D::default(),
-            preview_view: View2D::default(),
+            stage: PipelineStage::Source,
+            stage_stops: Vec::new(),
+            stage_hover: None,
+            source_view: View2D::default(),
+            key_view: View2D::default(),
+            palette_view: View2D::default(),
+            midi_view: View2D::default(),
             status: StatusMessage::default(),
-            source_hover: None,
-            preview_hover: None,
             jobs: JobRunner::new(),
             job_progress: None,
             job_config: None,
@@ -64,7 +69,6 @@ impl YuetuApp {
             job_started: None,
             auto_convert_at: None,
             left_panel_width: 310.0,
-            right_panel_width: 560.0,
         };
 
         if let Some(path) = startup_image {
@@ -103,10 +107,12 @@ impl YuetuApp {
                 self.source = Some(source);
                 self.source_revision = self.source_revision.wrapping_add(1);
                 self.preview = None;
-                self.source_hover = None;
-                self.preview_hover = None;
-                self.image_view.reset_fit();
-                self.preview_view.reset_fit();
+                self.stage = PipelineStage::Source;
+                self.stage_hover = None;
+                self.source_view.reset_fit();
+                self.key_view.reset_fit();
+                self.palette_view.reset_fit();
+                self.midi_view.reset_fit();
                 self.schedule_auto_conversion(ctx, Duration::ZERO);
             }
             Err(error) => {
@@ -243,15 +249,22 @@ impl YuetuApp {
                     } else {
                         self.status = StatusMessage::info("正在更新预览…");
                     }
-                    self.preview = Some(Preview {
-                        result,
-                        config,
-                        source_revision,
-                    });
-                    // Auto updates should keep the user's zoom/pan; only fit a
-                    // newly displayed preview.
-                    if !had_preview {
-                        self.preview_view.reset_fit();
+                    match Preview::new(ctx, result, config, source_revision) {
+                        Ok(preview) => {
+                            self.preview = Some(preview);
+                            // Auto updates should keep the user's zoom/pan;
+                            // only fit raster previews when first created.
+                            if !had_preview {
+                                self.key_view.reset_fit();
+                                self.palette_view.reset_fit();
+                                self.midi_view.reset_fit();
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!("failed to build stage textures: {error}");
+                            self.status =
+                                StatusMessage::error(format!("无法创建预览纹理：{error}"));
+                        }
                     }
                 }
                 JobEvent::Failed { message, .. } => {
@@ -356,11 +369,27 @@ impl YuetuApp {
     }
 
     fn clamp_panel_widths(&mut self, total_width: f32) {
-        const MIN_CENTER: f32 = 320.0;
-        let max_left = (total_width - self.right_panel_width - MIN_CENTER).clamp(220.0, 520.0);
+        const MIN_CENTER: f32 = 420.0;
+        let max_left = (total_width - stage_rail::WIDTH - MIN_CENTER).clamp(220.0, 560.0);
         self.left_panel_width = self.left_panel_width.clamp(220.0, max_left);
-        let max_right = (total_width - self.left_panel_width - MIN_CENTER).clamp(300.0, 900.0);
-        self.right_panel_width = self.right_panel_width.clamp(300.0, max_right);
+    }
+
+    fn current_view_mut(&mut self) -> &mut View2D {
+        match self.stage {
+            PipelineStage::Source => &mut self.source_view,
+            PipelineStage::KeyMap => &mut self.key_view,
+            PipelineStage::Palette => &mut self.palette_view,
+            PipelineStage::Midi => &mut self.midi_view,
+        }
+    }
+
+    fn current_zoom(&self) -> f32 {
+        match self.stage {
+            PipelineStage::Source => self.source_view.relative_zoom(),
+            PipelineStage::KeyMap => self.key_view.relative_zoom(),
+            PipelineStage::Palette => self.palette_view.relative_zoom(),
+            PipelineStage::Midi => self.midi_view.relative_zoom(),
+        }
     }
 }
 
@@ -376,21 +405,18 @@ impl eframe::App for YuetuApp {
         self.clamp_panel_widths(total_width);
         let config_before = self.settings.conversion_config();
         let updating = self.jobs.is_running() || self.auto_convert_at.is_some();
+        let can_export = self.preview_is_current();
 
         let mut toolbar_action = ui::toolbar::Action::default();
         egui::Panel::top("toolbar")
             .show_separator_line(false)
             .frame(theme::panel_frame(ui, theme::PanelKind::Top))
             .show(ui, |ui| {
-                toolbar_action =
-                    ui::toolbar::show(ui, self.preview_is_current(), self.jobs.is_running());
+                toolbar_action = ui::toolbar::show(ui, can_export, self.jobs.is_running());
             });
 
-        // Reserve the status bar before the central panel. It intentionally
-        // shows the previous frame's zoom/hover values; the status text itself
-        // is updated by actions below and repainted immediately.
-        let status_hover_source = self.source_hover;
-        let status_hover_preview = self.preview_hover;
+        // The status bar deliberately shows the previous frame's hover;
+        // the main text is updated by actions later in this frame.
         egui::Panel::bottom("status")
             .show_separator_line(false)
             .frame(theme::panel_frame(ui, theme::PanelKind::Bottom))
@@ -398,22 +424,28 @@ impl eframe::App for YuetuApp {
                 ui::status_bar::show(
                     ui,
                     &self.status,
-                    status_hover_source,
-                    status_hover_preview,
-                    self.image_view.relative_zoom(),
-                    self.preview_view.relative_zoom(),
+                    self.stage,
+                    self.stage_hover,
+                    self.current_zoom(),
                 );
             });
 
-        let mut controls_action = ui::controls::Action::default();
-        let can_export = self.preview_is_current();
+        // Reserved strip for the pipeline rail. The dot is drawn afterwards
+        // because it needs the card centers from the controls panel.
+        egui::Panel::left("stage_rail")
+            .exact_size(stage_rail::WIDTH)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(theme::panel_frame(ui, theme::PanelKind::Side))
+            .show(ui, |_ui| {});
+
         let left_panel = egui::Panel::left("controls")
             .exact_size(self.left_panel_width)
             .resizable(false)
             .show_separator_line(false)
             .frame(theme::panel_frame(ui, theme::PanelKind::Side))
             .show(ui, |ui| {
-                controls_action = ui::controls::show(
+                ui::controls::show(
                     ui,
                     &mut self.settings,
                     self.source.as_ref(),
@@ -421,49 +453,57 @@ impl eframe::App for YuetuApp {
                     self.jobs.is_running(),
                     self.job_progress.as_ref(),
                     can_export,
-                );
+                )
             });
+        let controls_output = left_panel.inner;
+        let controls_action = controls_output.action;
+        self.stage_stops = controls_output.stops;
         let left_rect = left_panel.response.rect;
 
-        let right_panel = egui::Panel::right("preview")
-            .exact_size(self.right_panel_width)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(theme::panel_frame(ui, theme::PanelKind::Side))
-            .show(ui, |ui| {
-                ui::preview_panel::show(
-                    ui,
-                    self.preview.as_ref(),
-                    updating,
-                    self.job_progress.as_ref(),
-                    &mut self.preview_view,
-                    &mut self.preview_hover,
-                );
-            });
-        let right_rect = right_panel.response.rect;
+        let mut acted = false;
+        if let Some(stage) = stage_rail::show(&ctx, &self.stage_stops, self.stage, root_rect.left())
+        {
+            if stage != self.stage {
+                self.stage = stage;
+                self.stage_hover = None;
+                acted = true;
+            }
+        }
 
-        let mut source_action = ui::source_panel::Action::default();
+        let mut stage_action = ui::stage_panel::Action::default();
         egui::CentralPanel::default()
             .frame(theme::panel_frame(ui, theme::PanelKind::Central))
             .show(ui, |ui| {
-                source_action = ui::source_panel::show(
+                let stage = self.stage;
+                let source = self.source.as_ref();
+                let preview = self.preview.as_ref();
+                let progress = self.job_progress.as_ref();
+                let view = match stage {
+                    PipelineStage::Source => &mut self.source_view,
+                    PipelineStage::KeyMap => &mut self.key_view,
+                    PipelineStage::Palette => &mut self.palette_view,
+                    PipelineStage::Midi => &mut self.midi_view,
+                };
+                stage_action = ui::stage_panel::show(
                     ui,
-                    self.source.as_ref(),
-                    &mut self.image_view,
-                    &mut self.source_hover,
+                    stage,
+                    source,
+                    preview,
+                    view,
+                    &mut self.stage_hover,
+                    updating,
+                    progress,
                 );
             });
-
-        let mut acted = false;
 
         let split_left = split_handle::vertical(
             &ctx,
             "split.left",
-            root_rect.left() + self.left_panel_width,
+            root_rect.left() + stage_rail::WIDTH + self.left_panel_width,
             egui::Rangef::new(left_rect.top(), left_rect.bottom()),
         );
         if split_left.dragged() {
-            let max_left = (total_width - self.right_panel_width - 320.0).clamp(220.0, 520.0);
+            let max_left = (total_width - stage_rail::WIDTH - 420.0).clamp(220.0, 560.0);
             self.left_panel_width =
                 (self.left_panel_width + split_left.drag_delta().x).clamp(220.0, max_left);
             self.clamp_panel_widths(total_width);
@@ -475,26 +515,7 @@ impl eframe::App for YuetuApp {
             acted = true;
         }
 
-        let split_right = split_handle::vertical(
-            &ctx,
-            "split.right",
-            root_rect.right() - self.right_panel_width,
-            egui::Rangef::new(right_rect.top(), right_rect.bottom()),
-        );
-        if split_right.dragged() {
-            let max_right = (total_width - self.left_panel_width - 320.0).clamp(300.0, 900.0);
-            self.right_panel_width =
-                (self.right_panel_width - split_right.drag_delta().x).clamp(300.0, max_right);
-            self.clamp_panel_widths(total_width);
-            acted = true;
-        }
-        if split_right.double_clicked() {
-            self.right_panel_width = 560.0;
-            self.clamp_panel_widths(total_width);
-            acted = true;
-        }
-
-        if toolbar_action.open || controls_action.open || source_action.open {
+        if toolbar_action.open || controls_action.open || stage_action.open {
             self.open_dialog(&ctx);
             acted = true;
         }
@@ -503,8 +524,7 @@ impl eframe::App for YuetuApp {
                 match source.select_frame(&ctx, frame) {
                     Ok(true) => {
                         self.source_revision = self.source_revision.wrapping_add(1);
-                        self.source_hover = None;
-                        self.preview_hover = None;
+                        self.stage_hover = None;
                         self.status = StatusMessage::info("正在更新预览…");
                         self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
                         acted = true;
@@ -525,8 +545,7 @@ impl eframe::App for YuetuApp {
             acted = true;
         }
         if toolbar_action.fit {
-            self.image_view.reset_fit();
-            self.preview_view.reset_fit();
+            self.current_view_mut().reset_fit();
             acted = true;
         }
 

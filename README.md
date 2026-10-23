@@ -5,21 +5,22 @@
 当前是可运行的第一阶段（M1 + 后台转换任务）：
 
 - 打开 / 拖入图片，缩放、平移查看原图；
-- GIF / 动态 WebP 逐帧选择，切帧后自动重新生成预览；
+- GIF / 动态 WebP 逐帧选择，切帧后自动重新生成；
+- 最左侧流水线圆点沿左侧卡片中心停靠，切换四个处理阶段；
+- 阶段视图：源图（像素标尺）→ 键位映射（按键宽缩放后的图片）→ 调色板（索引色）→ MIDI 输出（钢琴卷帘音符）；
 - 自动生成 popularity 调色板（每色一条音轨）；
 - 图片宽度映射到选定的 MIDI 键范围，逐行扫描生成音符；
 - 后台线程转换，带分阶段进度条，可随时取消（Esc）；
-- 打开图片后自动生成；任何转换参数变化都会自动重新生成预览，不需要手动点“生成”；
+- 打开图片后自动生成；任何转换参数变化都会自动重新生成，不需要手动点“生成”；
 - 触控板双指滚动平移（上下左右）、捏合缩放；鼠标滚轮缩放；方向键平移；
-- 左右面板使用自定义 split handle，拖动宽度、双击恢复默认；
+- 左侧面板使用自定义 split handle，拖动宽度、双击恢复默认；
 - 设置卡片统一为“名称在左、控件在右”，卡片标题和操作同一行；
-- 右侧实时显示钢琴卷帘预览（横轴音高、纵轴时间）；
-- 预览音符合并为单个 `egui::Mesh`；
+- 钢琴卷帘音符合并为单个 `egui::Mesh`；
 - 导出标准 Format-1 `.mid`，可选写入原版的颜色 Meta 事件。
 
 > 这一步的重点不是功能多，而是把**数据边界**先定下来：
-> `RgbaImage` → `Palette/KeyMap` → `IndexedImage` → `ConversionResult` → UI/MIDI。
-> 预览只读 `ConversionResult`，不依赖图片控件，也不依赖 wgpu 细节。
+> `RgbaImage` → `Palette/KeyMap` → `ResizedImage/IndexedImage` → `ConversionResult` → UI/MIDI。
+> 所有阶段视图都只读 `ConversionResult` 或源图，不依赖 wgpu 细节。
 
 ## 运行
 
@@ -53,9 +54,9 @@ crates/
   yuetu-app/           # 表现层：eframe + egui
     app.rs             #   状态与动作编排
     settings.rs        #   UI 参数 → core 配置
-    state.rs           #   SourceImage / Preview / 状态消息
-    ui/                #   面板拆分（toolbar/controls/preview/status）
-    widgets/           #   可复用控件（图片视图、钢琴卷帘、View2D）
+    state.rs           #   SourceImage / Preview / PipelineStage / 状态消息
+    ui/                #   面板拆分（toolbar/controls/stage/status）
+    widgets/           #   流水线轨道、阶段图片、钢琴卷帘、View2D
     theme.rs           #   主题
 ```
 
@@ -70,7 +71,7 @@ crates/
 
 ## HiDPI
 
-由 eframe / egui / wgpu 自动处理：窗口、字体、控件、分割线、预览坐标都以逻辑点为单位，纹理使用实际像素尺寸。Retina 2x 下已验证 UI 和图片显示清晰，不需要额外的 1x/2x 分支。
+由 eframe / egui / wgpu 自动处理：窗口、字体、控件、分割线、标尺、预览坐标都以逻辑点为单位，纹理使用实际像素尺寸。Retina 2x 下已验证 UI 和图片显示清晰，不需要额外的 1x/2x 分支。
 
 ## 主题
 

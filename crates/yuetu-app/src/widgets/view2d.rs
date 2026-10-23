@@ -1,4 +1,4 @@
-//! Shared 2D pan/zoom viewport used by the source image and the MIDI preview.
+//! Shared 2D pan/zoom viewport used by every pipeline stage view.
 //!
 //! Trackpad two-finger scrolling pans in both axes; pinch zooms around the
 //! cursor. Mouse-wheel lines and Ctrl/Cmd+scroll zoom, drag pans, arrows pan,
