@@ -12,6 +12,12 @@ enum ScrollSource {
     Touchpad,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ZoomAnchor {
+    /// Content coordinate captured at the start of the zoom gesture.
+    content: [f64; 2],
+}
+
 #[derive(Clone, Debug)]
 pub struct View2D {
     pub zoom: f32,
@@ -22,6 +28,7 @@ pub struct View2D {
     last_viewport: Rect,
     last_content_size: Vec2,
     scroll_source: Option<ScrollSource>,
+    zoom_anchor: Option<ZoomAnchor>,
 }
 
 impl Default for View2D {
@@ -35,6 +42,7 @@ impl Default for View2D {
             last_viewport: Rect::NOTHING,
             last_content_size: Vec2::splat(1.0),
             scroll_source: None,
+            zoom_anchor: None,
         }
     }
 }
@@ -44,6 +52,7 @@ impl View2D {
         self.zoom = 1.0;
         self.pan = Vec2::ZERO;
         self.fit_pending = true;
+        self.zoom_anchor = None;
     }
 
     /// Current absolute zoom in percent, where 100% means one image pixel per
@@ -59,6 +68,7 @@ impl View2D {
         let target_scale = (percent * 0.01).clamp(0.01, 64.0);
         self.zoom = (target_scale / self.last_fit).clamp(0.02, 120.0);
         self.fit_pending = false;
+        self.zoom_anchor = None;
         self.last_scale = self.last_fit * self.zoom;
     }
 
@@ -70,6 +80,7 @@ impl View2D {
         self.zoom = (target_scale / self.last_fit).clamp(0.02, 120.0);
         self.pan = Vec2::ZERO;
         self.fit_pending = false;
+        self.zoom_anchor = None;
         self.last_scale = self.last_fit * self.zoom;
     }
 
@@ -96,15 +107,18 @@ impl View2D {
             self.zoom = 1.0;
             self.pan = Vec2::ZERO;
             self.fit_pending = false;
+            self.zoom_anchor = None;
         }
 
         if response.double_clicked() {
             self.zoom = 1.0;
             self.pan = Vec2::ZERO;
+            self.zoom_anchor = None;
         }
 
         if response.dragged_by(egui::PointerButton::Primary) {
             self.pan += response.drag_delta();
+            self.zoom_anchor = None;
         }
 
         if response.hovered() {
@@ -151,17 +165,24 @@ impl View2D {
                     wheel_y * 20.0
                 };
                 let factor = (pinch * (dy * 0.0018).exp()).clamp(0.5, 2.0);
-                // Wheel zoom stays centered on the viewport. Anchoring it at
-                // the cursor makes the viewport translate by roughly the
-                // cursor-to-center offset on every step; at high zoom that
-                // looks like the image suddenly scrolling up/down. Pinch
-                // remains pointer-anchored because trackpad gestures are
-                // already precise.
-                self.zoom_at(viewport, fit, Some(viewport.center()), factor);
+                self.zoom_at(viewport, fit, response.hover_pos(), factor);
             } else {
                 // Trackpad two-finger scroll: move the content in both axes.
-                self.pan += scroll;
+                // While a pinch is active, do not also apply scroll as pan:
+                // some devices emit both and that combination is exactly the
+                // "zoom + vertical scroll" bug at high zoom.
+                let zooming = (pinch - 1.0).abs() > 1e-4;
+                if !zooming {
+                    self.pan += scroll;
+                }
                 self.zoom_at(viewport, fit, response.hover_pos(), pinch);
+            }
+
+            if (pinch - 1.0).abs() <= 1e-4 && self.scroll_source != Some(ScrollSource::Wheel) {
+                self.zoom_anchor = None;
+            }
+            if self.scroll_source.is_none() && !has_wheel && !has_point {
+                self.zoom_anchor = None;
             }
 
             if !ui.ctx().egui_wants_keyboard_input() {
@@ -183,9 +204,13 @@ impl View2D {
                 });
                 if arrow != Vec2::ZERO {
                     self.pan += arrow;
+                    self.zoom_anchor = None;
                     ui.ctx().request_repaint();
                 }
             }
+        } else {
+            self.scroll_source = None;
+            self.zoom_anchor = None;
         }
 
         if response.dragged() {
@@ -217,17 +242,37 @@ impl View2D {
             return;
         }
 
-        let old_scale = fit * self.zoom;
-        let new_zoom = (self.zoom * factor).clamp(0.02, 120.0);
-        let new_scale = fit * new_zoom;
+        let old_scale = f64::from(fit) * f64::from(self.zoom);
+        let new_zoom = (f64::from(self.zoom) * f64::from(factor)).clamp(0.02, 120.0);
+        let new_scale = f64::from(fit) * new_zoom;
 
         if let Some(pointer) = pointer {
-            let old_center = viewport.center() + self.pan;
-            let content_offset = (pointer - old_center) / old_scale.max(1e-6);
-            let new_center = pointer - content_offset * new_scale;
-            self.pan = new_center - viewport.center();
+            // Capture the content point once per gesture, then keep that exact
+            // content point under the cursor. Recomputing it from the rounded
+            // f32 pan on every wheel event accumulates a visible drift at
+            // extreme zoom. The anchor math itself uses f64.
+            let anchor = self.zoom_anchor.unwrap_or_else(|| {
+                let old_center_x = f64::from(viewport.center().x) + f64::from(self.pan.x);
+                let old_center_y = f64::from(viewport.center().y) + f64::from(self.pan.y);
+                ZoomAnchor {
+                    content: [
+                        (f64::from(pointer.x) - old_center_x) / old_scale.max(1e-12),
+                        (f64::from(pointer.y) - old_center_y) / old_scale.max(1e-12),
+                    ],
+                }
+            });
+            self.zoom_anchor = Some(anchor);
+
+            let new_center_x = f64::from(pointer.x) - anchor.content[0] * new_scale;
+            let new_center_y = f64::from(pointer.y) - anchor.content[1] * new_scale;
+            self.pan = Vec2::new(
+                (new_center_x - f64::from(viewport.center().x)) as f32,
+                (new_center_y - f64::from(viewport.center().y)) as f32,
+            );
+        } else {
+            self.zoom_anchor = None;
         }
-        self.zoom = new_zoom;
+        self.zoom = new_zoom as f32;
     }
 }
 
@@ -236,6 +281,41 @@ pub struct ViewInteraction {
     pub viewport: Rect,
     pub content_rect: Rect,
     pub scale: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_anchor_stays_stable_during_subpixel_zooms() {
+        let mut view = View2D {
+            zoom: 100.0,
+            pan: egui::vec2(123.4, -789.1),
+            fit_pending: false,
+            ..View2D::default()
+        };
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0));
+        let pointer = egui::pos2(870.0, 120.0);
+        let fit = 0.5;
+
+        let content_point = |view: &View2D| {
+            let center = viewport.center() + view.pan;
+            let scale = fit * view.zoom;
+            (pointer - center) / scale
+        };
+        let before = content_point(&view);
+
+        for _ in 0..2000 {
+            view.zoom_at(viewport, fit, Some(pointer), 1.00005);
+        }
+
+        let after = content_point(&view);
+        assert!(
+            (before - after).length() < 0.01,
+            "anchor drifted from {before:?} to {after:?}"
+        );
+    }
 }
 
 impl ViewInteraction {
