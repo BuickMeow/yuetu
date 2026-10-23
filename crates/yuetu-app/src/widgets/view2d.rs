@@ -6,6 +6,10 @@
 
 use egui::{CursorIcon, Event, Key, MouseWheelUnit, Pos2, Rect, Response, Sense, Ui, Vec2};
 
+const MIN_ABSOLUTE_SCALE: f64 = 0.01;
+const MAX_ABSOLUTE_SCALE: f64 = 64.0;
+const MAX_RELATIVE_ZOOM: f64 = 120.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScrollSource {
     Wheel,
@@ -76,7 +80,8 @@ impl View2D {
         if self.last_content_size.x <= 0.0 || self.last_viewport.width() <= 0.0 {
             return;
         }
-        let target_scale = (self.last_viewport.width() / self.last_content_size.x) * 0.98;
+        let target_scale = ((self.last_viewport.width() / self.last_content_size.x) * 0.98)
+            .clamp(MIN_ABSOLUTE_SCALE as f32, MAX_ABSOLUTE_SCALE as f32);
         self.zoom = (target_scale / self.last_fit).clamp(0.02, 120.0);
         self.pan = Vec2::ZERO;
         self.fit_pending = false;
@@ -243,7 +248,20 @@ impl View2D {
         }
 
         let old_scale = f64::from(fit) * f64::from(self.zoom);
-        let new_zoom = (f64::from(self.zoom) * f64::from(factor)).clamp(0.02, 120.0);
+        let min_zoom = (MIN_ABSOLUTE_SCALE / f64::from(fit)).max(0.02);
+        let max_zoom = (MAX_ABSOLUTE_SCALE / f64::from(fit)).min(MAX_RELATIVE_ZOOM);
+        let new_zoom = (f64::from(self.zoom) * f64::from(factor)).clamp(min_zoom, max_zoom);
+        let new_zoom_f32 = new_zoom as f32;
+
+        // At a zoom limit (or after a subpixel step that rounds to the same
+        // f32 zoom), there is no zoom change. Never recompute `pan` in that
+        // case, otherwise continuing to scroll at the end stop would translate
+        // the viewport.
+        if new_zoom_f32 == self.zoom {
+            self.zoom_anchor = None;
+            return;
+        }
+
         let new_scale = f64::from(fit) * new_zoom;
 
         if let Some(pointer) = pointer {
@@ -272,7 +290,7 @@ impl View2D {
         } else {
             self.zoom_anchor = None;
         }
-        self.zoom = new_zoom as f32;
+        self.zoom = new_zoom_f32;
     }
 }
 
@@ -315,6 +333,25 @@ mod tests {
             (before - after).length() < 0.01,
             "anchor drifted from {before:?} to {after:?}"
         );
+    }
+
+    #[test]
+    fn zoom_at_limit_does_not_move_pan() {
+        let mut view = View2D {
+            zoom: 120.0,
+            pan: egui::vec2(321.0, -654.0),
+            fit_pending: false,
+            ..View2D::default()
+        };
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0));
+        let before = view.pan;
+
+        for _ in 0..100 {
+            view.zoom_at(viewport, 0.5, Some(egui::pos2(800.0, 150.0)), 1.25);
+        }
+
+        assert_eq!(view.pan, before);
+        assert_eq!(view.zoom, 120.0);
     }
 }
 
