@@ -15,6 +15,7 @@ license = "MIT"
 yuetu-core = { path = "crates/yuetu-core" }
 
 egui = "0.37.0"
+egui_material_icons = { version = "0.9", features = ["outline"] }
 eframe = { version = "0.37.0", default-features = false, features = [
     "wgpu",
     "default_fonts",

@@ -383,12 +383,12 @@ impl YuetuApp {
         }
     }
 
-    fn current_zoom(&self) -> f32 {
+    fn current_zoom_percent(&self) -> f32 {
         match self.stage {
-            PipelineStage::Source => self.source_view.relative_zoom(),
-            PipelineStage::KeyMap => self.key_view.relative_zoom(),
-            PipelineStage::Palette => self.palette_view.relative_zoom(),
-            PipelineStage::Midi => self.midi_view.relative_zoom(),
+            PipelineStage::Source => self.source_view.absolute_zoom_percent(),
+            PipelineStage::KeyMap => self.key_view.absolute_zoom_percent(),
+            PipelineStage::Palette => self.palette_view.absolute_zoom_percent(),
+            PipelineStage::Midi => self.midi_view.absolute_zoom_percent(),
         }
     }
 }
@@ -407,26 +407,22 @@ impl eframe::App for YuetuApp {
         let updating = self.jobs.is_running() || self.auto_convert_at.is_some();
         let can_export = self.preview_is_current();
 
-        let mut toolbar_action = ui::toolbar::Action::default();
-        egui::Panel::top("toolbar")
-            .show_separator_line(false)
-            .frame(theme::panel_frame(ui, theme::PanelKind::Top))
-            .show(ui, |ui| {
-                toolbar_action = ui::toolbar::show(ui, can_export, self.jobs.is_running());
-            });
-
         // The status bar deliberately shows the previous frame's hover;
-        // the main text is updated by actions later in this frame.
+        // the main text and zoom are updated by actions later in this frame.
+        let mut status_action = ui::status_bar::Action::default();
+        let zoom_enabled = self.source.is_some()
+            && (self.stage == PipelineStage::Source || self.preview.is_some());
         egui::Panel::bottom("status")
             .show_separator_line(false)
             .frame(theme::panel_frame(ui, theme::PanelKind::Bottom))
             .show(ui, |ui| {
-                ui::status_bar::show(
+                status_action = ui::status_bar::show(
                     ui,
                     &self.status,
                     self.stage,
                     self.stage_hover,
-                    self.current_zoom(),
+                    self.current_zoom_percent(),
+                    zoom_enabled,
                 );
             });
 
@@ -515,7 +511,7 @@ impl eframe::App for YuetuApp {
             acted = true;
         }
 
-        if toolbar_action.open || controls_action.open || stage_action.open {
+        if controls_action.open || stage_action.open {
             self.open_dialog(&ctx);
             acted = true;
         }
@@ -536,16 +532,20 @@ impl eframe::App for YuetuApp {
                 }
             }
         }
-        if toolbar_action.export || controls_action.export {
+        if controls_action.export {
             self.export_dialog();
             acted = true;
         }
-        if toolbar_action.cancel || controls_action.cancel {
+        if controls_action.cancel {
             self.cancel_conversion();
             acted = true;
         }
-        if toolbar_action.fit {
-            self.current_view_mut().reset_fit();
+        if let Some(percent) = status_action.set_zoom_percent {
+            self.current_view_mut().set_absolute_zoom_percent(percent);
+            acted = true;
+        }
+        if status_action.fit_width {
+            self.current_view_mut().fit_width();
             acted = true;
         }
 

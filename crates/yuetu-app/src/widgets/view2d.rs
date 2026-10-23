@@ -6,11 +6,22 @@
 
 use egui::{CursorIcon, Event, Key, MouseWheelUnit, Pos2, Rect, Response, Sense, Ui, Vec2};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollSource {
+    Wheel,
+    Touchpad,
+}
+
 #[derive(Clone, Debug)]
 pub struct View2D {
     pub zoom: f32,
     pub pan: Vec2,
     fit_pending: bool,
+    last_scale: f32,
+    last_fit: f32,
+    last_viewport: Rect,
+    last_content_size: Vec2,
+    scroll_source: Option<ScrollSource>,
 }
 
 impl Default for View2D {
@@ -19,6 +30,11 @@ impl Default for View2D {
             zoom: 1.0,
             pan: Vec2::ZERO,
             fit_pending: true,
+            last_scale: 1.0,
+            last_fit: 1.0,
+            last_viewport: Rect::NOTHING,
+            last_content_size: Vec2::splat(1.0),
+            scroll_source: None,
         }
     }
 }
@@ -30,9 +46,31 @@ impl View2D {
         self.fit_pending = true;
     }
 
-    /// Scale relative to the fit-to-viewport scale (1.0 = fully fitted).
-    pub fn relative_zoom(&self) -> f32 {
-        self.zoom
+    /// Current absolute zoom in percent, where 100% means one image pixel per
+    /// logical point.
+    pub fn absolute_zoom_percent(&self) -> f32 {
+        self.last_scale * 100.0
+    }
+
+    pub fn set_absolute_zoom_percent(&mut self, percent: f32) {
+        if self.last_fit <= 1e-6 {
+            return;
+        }
+        let target_scale = (percent * 0.01).clamp(0.01, 64.0);
+        self.zoom = (target_scale / self.last_fit).clamp(0.02, 120.0);
+        self.fit_pending = false;
+        self.last_scale = self.last_fit * self.zoom;
+    }
+
+    pub fn fit_width(&mut self) {
+        if self.last_content_size.x <= 0.0 || self.last_viewport.width() <= 0.0 {
+            return;
+        }
+        let target_scale = (self.last_viewport.width() / self.last_content_size.x) * 0.98;
+        self.zoom = (target_scale / self.last_fit).clamp(0.02, 120.0);
+        self.pan = Vec2::ZERO;
+        self.fit_pending = false;
+        self.last_scale = self.last_fit * self.zoom;
     }
 
     pub fn interact(
@@ -70,25 +108,49 @@ impl View2D {
         }
 
         if response.hovered() {
-            let (scroll, pinch, wheel_is_zoom) = ui.input(|input| {
+            let (scroll, pinch, has_wheel, has_point, wheel_y) = ui.input(|input| {
                 // Trackpads report Point deltas; a classic mouse wheel reports
-                // Line/Page. Treat the former as panning, the latter as zoom.
-                let wheel_is_zoom = input.modifiers.command
-                    || input.modifiers.ctrl
-                    || input.events.iter().any(|event| {
-                        matches!(
-                            event,
-                            Event::MouseWheel {
-                                unit: MouseWheelUnit::Line | MouseWheelUnit::Page,
-                                ..
+                // Line/Page. Remember the gesture source across frames: egui
+                // smooths scroll over several frames, and a wheel must never
+                // become a pan just because its event frame has passed.
+                let mut has_wheel = false;
+                let mut has_point = false;
+                let mut wheel_y = 0.0;
+                for event in &input.events {
+                    if let Event::MouseWheel { unit, delta, .. } = event {
+                        match unit {
+                            MouseWheelUnit::Line | MouseWheelUnit::Page => {
+                                has_wheel = true;
+                                wheel_y += delta.y;
                             }
-                        )
-                    });
-                (input.smooth_scroll_delta, input.zoom_delta(), wheel_is_zoom)
+                            MouseWheelUnit::Point => has_point = true,
+                        }
+                    }
+                }
+                (
+                    input.smooth_scroll_delta,
+                    input.zoom_delta(),
+                    has_wheel,
+                    has_point,
+                    wheel_y,
+                )
             });
 
-            if wheel_is_zoom {
-                let factor = (pinch * (scroll.y * 0.0018).exp()).clamp(0.5, 2.0);
+            if has_wheel {
+                self.scroll_source = Some(ScrollSource::Wheel);
+            } else if has_point {
+                self.scroll_source = Some(ScrollSource::Touchpad);
+            } else if scroll == Vec2::ZERO && (pinch - 1.0).abs() <= 1e-4 {
+                self.scroll_source = None;
+            }
+
+            if self.scroll_source == Some(ScrollSource::Wheel) {
+                let dy = if scroll.y.abs() > 1e-6 {
+                    scroll.y
+                } else {
+                    wheel_y * 20.0
+                };
+                let factor = (pinch * (dy * 0.0018).exp()).clamp(0.5, 2.0);
                 self.zoom_at(viewport, fit, response.hover_pos(), factor);
             } else {
                 // Trackpad two-finger scroll: move the content in both axes.
@@ -129,6 +191,11 @@ impl View2D {
         let scale = fit * self.zoom;
         let center = viewport.center() + self.pan;
         let content_rect = Rect::from_center_size(center, content_size * scale);
+
+        self.last_scale = scale;
+        self.last_fit = fit;
+        self.last_viewport = viewport;
+        self.last_content_size = content_size;
 
         ViewInteraction {
             response,

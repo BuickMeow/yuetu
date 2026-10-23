@@ -4,13 +4,21 @@ use yuetu_core::{Color, note_name};
 use crate::state::{PipelineStage, StageHover, StatusKind, StatusMessage};
 use crate::theme;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Action {
+    pub set_zoom_percent: Option<f32>,
+    pub fit_width: bool,
+}
+
 pub fn show(
     ui: &mut Ui,
     status: &StatusMessage,
     stage: PipelineStage,
     hover: Option<StageHover>,
-    zoom: f32,
-) {
+    zoom_percent: f32,
+    zoom_enabled: bool,
+) -> Action {
+    let mut action = Action::default();
     let status_color = match status.kind {
         StatusKind::Info => theme::muted(ui),
         StatusKind::Success => theme::success(ui),
@@ -24,7 +32,34 @@ pub fn show(
         ui.label(RichText::new(status.text.as_str()).color(status_color));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(format!("{} {}", stage.label(), zoom_label(zoom)));
+            if ui
+                .add_enabled(zoom_enabled, egui::Button::new("适宽"))
+                .clicked()
+            {
+                action.fit_width = true;
+            }
+            if ui
+                .add_enabled(zoom_enabled, egui::Button::new("100%"))
+                .clicked()
+            {
+                action.set_zoom_percent = Some(100.0);
+            }
+
+            let mut percent = zoom_percent;
+            let response = ui.add_enabled(
+                zoom_enabled,
+                egui::DragValue::new(&mut percent)
+                    .range(1.0..=6400.0)
+                    .speed(1.0)
+                    .max_decimals(0)
+                    .suffix("%"),
+            );
+            if response.changed() {
+                action.set_zoom_percent = Some(percent);
+            }
+
+            ui.add_space(6.0);
+            ui.label(stage.label());
 
             if let Some(hover) = hover {
                 ui.add_space(10.0);
@@ -53,18 +88,12 @@ pub fn show(
             }
         });
     });
+
+    action
 }
 
 fn color_swatch(ui: &mut Ui, color: Color) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
     let color = egui::Color32::from_rgba_unmultiplied(color.r, color.g, color.b, color.a);
     ui.painter().rect_filled(rect, 2.0, color);
-}
-
-fn zoom_label(zoom: f32) -> String {
-    if (zoom - 1.0).abs() < 0.01 {
-        "适应".to_owned()
-    } else {
-        format!("{:.0}%", zoom * 100.0)
-    }
 }

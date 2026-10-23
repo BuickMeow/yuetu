@@ -1,7 +1,6 @@
 pub mod controls;
 pub mod stage_panel;
 pub mod status_bar;
-pub mod toolbar;
 
 use egui::{Rect, RichText, Ui};
 

@@ -37,7 +37,7 @@ pub fn show(
                 view,
                 source.texture.id(),
                 (source.image.width, source.image.height),
-                true,
+                source.has_transparency,
             );
             *hover = hovered.map(|pixel| StageHover::Source {
                 pos: (pixel.x, pixel.y),
@@ -61,7 +61,7 @@ pub fn show(
                         view,
                         preview.resized_texture.id(),
                         preview.result.resized_size,
-                        true,
+                        preview.resized_has_transparency,
                     );
                     *hover = hovered.map(|pixel| StageHover::KeyMap {
                         pos: (pixel.x, pixel.y),
@@ -82,7 +82,7 @@ pub fn show(
                             preview.result.indexed_image.width,
                             preview.result.indexed_image.height,
                         ),
-                        true,
+                        preview.indexed_has_transparency,
                     );
                     *hover = hovered.map(|pixel| {
                         let index = preview.result.indexed_image.at(pixel.x, pixel.y);

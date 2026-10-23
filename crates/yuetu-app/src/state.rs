@@ -18,6 +18,7 @@ pub struct SourceImage {
     pub name: String,
     /// The currently selected frame, shared with the conversion job.
     pub image: Arc<RgbaImage>,
+    pub has_transparency: bool,
     frames: Vec<Arc<RgbaImage>>,
     frame_index: usize,
     pub texture: TextureHandle,
@@ -28,6 +29,7 @@ impl SourceImage {
         let sequence = load_image_sequence(&path)?;
         let frames: Vec<Arc<RgbaImage>> = sequence.frames.into_iter().map(Arc::new).collect();
         let image = frames[0].clone();
+        let has_transparency = image_has_transparency(&image);
         let texture_name = format!("source:{}:0", path.display());
         let texture = upload_texture(ctx, &texture_name, &image)?;
 
@@ -41,6 +43,7 @@ impl SourceImage {
             path,
             name,
             image,
+            has_transparency,
             frames,
             frame_index: 0,
             texture,
@@ -65,9 +68,11 @@ impl SourceImage {
         }
 
         let image = self.frames[index].clone();
+        let has_transparency = image_has_transparency(&image);
         let texture_name = format!("source:{}:{index}", self.path.display());
         let texture = upload_texture(ctx, &texture_name, &image)?;
         self.image = image;
+        self.has_transparency = has_transparency;
         self.frame_index = index;
         self.texture = texture;
         Ok(true)
@@ -167,8 +172,10 @@ pub struct Preview {
     pub source_revision: u64,
     /// Display texture for the resized (key-mapped) image.
     pub resized_texture: TextureHandle,
+    pub resized_has_transparency: bool,
     /// Display texture for the palette-indexed image.
     pub indexed_texture: TextureHandle,
+    pub indexed_has_transparency: bool,
 }
 
 impl Preview {
@@ -178,9 +185,11 @@ impl Preview {
         config: ConversionConfig,
         source_revision: u64,
     ) -> yuetu_core::Result<Self> {
+        let resized_has_transparency = image_has_transparency(&result.resized_image);
         let resized_name = format!("stage:resized:{source_revision}");
         let resized_texture = upload_texture(ctx, &resized_name, &result.resized_image)?;
 
+        let indexed_has_transparency = result.indexed_image.indices.iter().any(|&index| index < 0);
         let indexed_rgba = indexed_to_rgba(&result.indexed_image, &result.palette)?;
         let indexed_name = format!("stage:indexed:{source_revision}");
         let indexed_texture = upload_texture(ctx, &indexed_name, &indexed_rgba)?;
@@ -190,9 +199,15 @@ impl Preview {
             config,
             source_revision,
             resized_texture,
+            resized_has_transparency,
             indexed_texture,
+            indexed_has_transparency,
         })
     }
+}
+
+fn image_has_transparency(image: &RgbaImage) -> bool {
+    image.pixels.chunks_exact(4).any(|pixel| pixel[3] < 255)
 }
 
 fn indexed_to_rgba(indexed: &IndexedImage, palette: &Palette) -> yuetu_core::Result<RgbaImage> {

@@ -25,7 +25,12 @@ pub fn show(
 
     painter.rect_filled(interaction.viewport, 0.0, theme::view_bg(ui));
     if checkerboard {
-        draw_checkerboard(&painter, interaction.content_rect, ui.visuals());
+        draw_checkerboard(
+            &painter,
+            interaction.content_rect,
+            interaction.viewport,
+            ui.visuals(),
+        );
     }
 
     painter.image(
@@ -60,13 +65,22 @@ pub fn show(
     hovered
 }
 
-fn draw_checkerboard(painter: &egui::Painter, rect: Rect, visuals: &egui::Visuals) {
+fn draw_checkerboard(painter: &egui::Painter, rect: Rect, viewport: Rect, visuals: &egui::Visuals) {
+    let visible = rect.intersect(viewport);
+    if !visible.is_positive() {
+        return;
+    }
+
+    // Only walk the visible part of the canvas. Zooming a large image to a
+    // huge content rect used to manufacture millions of off-screen cells.
     let cell = 12.0;
     let light = visuals.faint_bg_color;
-    let cols = (rect.width() / cell).ceil() as i32;
-    let rows = (rect.height() / cell).ceil() as i32;
-    for y in 0..rows {
-        for x in 0..cols {
+    let x0 = ((visible.left() - rect.left()) / cell).floor() as i32;
+    let x1 = ((visible.right() - rect.left()) / cell).ceil() as i32;
+    let y0 = ((visible.top() - rect.top()) / cell).floor() as i32;
+    let y1 = ((visible.bottom() - rect.top()) / cell).ceil() as i32;
+    for y in y0..y1 {
+        for x in x0..x1 {
             if (x + y) % 2 != 0 {
                 continue;
             }

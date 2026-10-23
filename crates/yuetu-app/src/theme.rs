@@ -37,13 +37,13 @@ pub const RADIUS_MD: CornerRadius = CornerRadius::same(10);
 
 #[derive(Clone, Copy)]
 pub enum PanelKind {
-    Top,
     Bottom,
     Side,
     Central,
 }
 
 pub fn apply(ctx: &egui::Context) {
+    ctx.add_font(egui_material_icons::font_insert());
     // Use egui's built-in theme while CUSTOM_THEME is off.
     ctx.set_theme(THEME_PREFERENCE);
     if !CUSTOM_THEME {
@@ -112,16 +112,11 @@ pub fn panel_frame(ui: &Ui, kind: PanelKind) -> Frame {
     if !CUSTOM_THEME {
         return match kind {
             PanelKind::Central => Frame::central_panel(ui.style()),
-            PanelKind::Top | PanelKind::Bottom | PanelKind::Side => {
-                Frame::side_top_panel(ui.style())
-            }
+            PanelKind::Bottom | PanelKind::Side => Frame::side_top_panel(ui.style()),
         };
     }
 
     match kind {
-        PanelKind::Top => Frame::new()
-            .fill(BG_CARD)
-            .inner_margin(Margin::symmetric(12, 8)),
         PanelKind::Bottom => Frame::new()
             .fill(BG_APP)
             .inner_margin(Margin::symmetric(12, 5)),

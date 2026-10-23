@@ -23,13 +23,13 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([1040.0, 640.0])
-            .with_title("Yuetu · Image to MIDI"),
+            .with_title("月兔"),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 
     eframe::run_native(
-        "Yuetu",
+        "月兔",
         options,
         Box::new(move |cc| Ok(Box::new(app::YuetuApp::new(cc, startup_image.clone())))),
     )

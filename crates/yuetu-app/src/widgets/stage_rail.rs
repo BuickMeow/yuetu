@@ -1,15 +1,28 @@
-//! Vertical pipeline rail: one dot, snapping to card centers.
+//! Vertical pipeline rail with Material Icons at every stage.
 
-use egui::{Area, CursorIcon, Id, Order, Rect, Sense};
+use egui::{Area, CursorIcon, FontId, Id, Order, Rect, Sense};
+use egui_material_icons::MaterialIcon;
+use egui_material_icons::icons::{ICON_IMAGE, ICON_MUSIC_NOTE, ICON_PALETTE, ICON_PIANO};
 
 use crate::state::{PipelineStage, StageStop};
 use crate::theme;
 
-pub const WIDTH: f32 = 26.0;
+pub const WIDTH: f32 = 32.0;
+const TRACK_W: f32 = 8.0;
+const THUMB_RADIUS: f32 = 12.0;
+const ICON_SIZE: f32 = 18.0;
+
+fn stage_icon(stage: PipelineStage) -> MaterialIcon {
+    match stage {
+        PipelineStage::Source => ICON_IMAGE,
+        PipelineStage::KeyMap => ICON_PIANO,
+        PipelineStage::Palette => ICON_PALETTE,
+        PipelineStage::Midi => ICON_MUSIC_NOTE,
+    }
+}
 
 /// Draw the rail over the reserved left strip. Returns the newly selected
-/// stage while the dot is clicked/dragged; the dot itself always rests on a
-/// card center, never between stops.
+/// stage while the thumb is clicked/dragged; it always rests on a card center.
 pub fn show(
     ctx: &egui::Context,
     stops: &[StageStop],
@@ -29,8 +42,8 @@ pub fn show(
     }
 
     let hit = Rect::from_min_max(
-        egui::pos2(x, top - 18.0),
-        egui::pos2(x + WIDTH, bottom + 18.0),
+        egui::pos2(x, top - 20.0),
+        egui::pos2(x + WIDTH, bottom + 20.0),
     );
 
     Area::new(Id::unique("stage.rail"))
@@ -54,40 +67,49 @@ pub fn show(
 
             let center_x = x + WIDTH * 0.5;
             let track = Rect::from_min_max(
-                egui::pos2(center_x - 3.0, top),
-                egui::pos2(center_x + 3.0, bottom),
+                egui::pos2(center_x - TRACK_W * 0.5, top),
+                egui::pos2(center_x + TRACK_W * 0.5, bottom),
             );
             ui.painter()
-                .rect_filled(track, 3.0, theme::accent(ui).gamma_multiply(0.28));
+                .rect_filled(track, TRACK_W * 0.5, ui.visuals().widgets.inactive.bg_fill);
 
-            let line_color = theme::muted(ui).gamma_multiply(0.8);
-            ui.painter().line_segment(
-                [egui::pos2(center_x, top), egui::pos2(center_x, bottom)],
-                egui::Stroke::new(1.0, line_color),
-            );
-
-            for stop in stops {
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(center_x - 4.0, stop.center_y),
-                        egui::pos2(center_x + 4.0, stop.center_y),
-                    ],
-                    egui::Stroke::new(1.0, theme::muted(ui).gamma_multiply(0.65)),
-                );
-            }
-
-            let selected_y = chosen
-                .and_then(|stage| stops.iter().find(|stop| stop.stage == stage))
-                .or_else(|| stops.iter().find(|stop| stop.stage == current))
+            let selected_stage = chosen.unwrap_or(current);
+            let selected_y = stops
+                .iter()
+                .find(|stop| stop.stage == selected_stage)
                 .map(|stop| stop.center_y)
                 .unwrap_or(top);
-            let radius = if response.hovered() || response.dragged() {
-                5.5
-            } else {
-                4.5
-            };
-            ui.painter()
-                .circle_filled(egui::pos2(center_x, selected_y), radius, theme::accent(ui));
+            ui.painter().circle_filled(
+                egui::pos2(center_x, selected_y),
+                THUMB_RADIUS,
+                theme::accent(ui),
+            );
+
+            let pointer_y = response.hover_pos().map(|pos| pos.y);
+            let hovered_stage = pointer_y.and_then(|y| {
+                stops
+                    .iter()
+                    .min_by(|a, b| (a.center_y - y).abs().total_cmp(&(b.center_y - y).abs()))
+                    .map(|stop| stop.stage)
+            });
+
+            for stop in stops {
+                let icon = stage_icon(stop.stage);
+                let color = if stop.stage == selected_stage {
+                    ui.visuals().panel_fill
+                } else if hovered_stage == Some(stop.stage) {
+                    ui.visuals().text_color()
+                } else {
+                    theme::muted(ui)
+                };
+                ui.painter().text(
+                    egui::pos2(center_x, stop.center_y),
+                    egui::Align2::CENTER_CENTER,
+                    icon.codepoint,
+                    FontId::new(ICON_SIZE, icon.font_family()),
+                    color,
+                );
+            }
 
             if response.hovered() || response.dragged() {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
