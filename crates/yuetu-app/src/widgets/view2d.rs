@@ -151,7 +151,13 @@ impl View2D {
                     wheel_y * 20.0
                 };
                 let factor = (pinch * (dy * 0.0018).exp()).clamp(0.5, 2.0);
-                self.zoom_at(viewport, fit, response.hover_pos(), factor);
+                // Wheel zoom stays centered on the viewport. Anchoring it at
+                // the cursor makes the viewport translate by roughly the
+                // cursor-to-center offset on every step; at high zoom that
+                // looks like the image suddenly scrolling up/down. Pinch
+                // remains pointer-anchored because trackpad gestures are
+                // already precise.
+                self.zoom_at(viewport, fit, Some(viewport.center()), factor);
             } else {
                 // Trackpad two-finger scroll: move the content in both axes.
                 self.pan += scroll;
