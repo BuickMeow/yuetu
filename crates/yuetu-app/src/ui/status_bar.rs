@@ -1,4 +1,6 @@
 use egui::{RichText, Ui};
+use egui_material_icons::MaterialIcon;
+use egui_material_icons::icons::{ICON_FIT_WIDTH, ICON_PERCENT};
 use yuetu_core::{Color, note_name};
 
 use crate::state::{PipelineStage, StageHover, StatusKind, StatusMessage};
@@ -32,16 +34,10 @@ pub fn show(
         ui.label(RichText::new(status.text.as_str()).color(status_color));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add_enabled(zoom_enabled, egui::Button::new("适宽"))
-                .clicked()
-            {
+            if icon_button(ui, ICON_FIT_WIDTH, zoom_enabled, "按宽度缩放").clicked() {
                 action.fit_width = true;
             }
-            if ui
-                .add_enabled(zoom_enabled, egui::Button::new("100%"))
-                .clicked()
-            {
+            if icon_button(ui, ICON_PERCENT, zoom_enabled, "100%").clicked() {
                 action.set_zoom_percent = Some(100.0);
             }
 
@@ -90,6 +86,17 @@ pub fn show(
     });
 
     action
+}
+
+fn icon_button(ui: &mut Ui, icon: MaterialIcon, enabled: bool, tooltip: &str) -> egui::Response {
+    let text = RichText::new(icon.codepoint)
+        .family(icon.font_family())
+        .size(18.0);
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(text).min_size(egui::vec2(30.0, 26.0)),
+    )
+    .on_hover_text(tooltip)
 }
 
 fn color_swatch(ui: &mut Ui, color: Color) {
