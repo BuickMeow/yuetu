@@ -48,6 +48,7 @@ pub struct SourceImage {
     rotation_deg: f32,
     thumbnails: Vec<Option<Thumbnail>>,
     pub texture: TextureHandle,
+    texture_dirty: bool,
 }
 
 impl SourceImage {
@@ -55,9 +56,8 @@ impl SourceImage {
         let ImageSequence { frames, delays_ms } = load_image_sequence(&path)?;
         let frames: Vec<Arc<RgbaImage>> = frames.into_iter().map(Arc::new).collect();
         let image = frames[0].clone();
-        let display_image = image.clone();
-        let display_size = (image.width, image.height);
-        let interaction_image = prepare_interaction(&image, 0.0)?;
+        let (display_image, display_size) = prepare_display(ctx, &image, 0.0)?;
+        let interaction_image = prepare_interaction_from_display(&display_image)?;
         let has_transparency = image_has_transparency(&display_image);
         let texture_name = format!("source:{}:0", path.display());
         let texture = upload_texture(ctx, &texture_name, &display_image)?;
@@ -85,6 +85,7 @@ impl SourceImage {
                 .take(thumbnail_count)
                 .collect(),
             texture,
+            texture_dirty: false,
         })
     }
 
@@ -104,7 +105,7 @@ impl SourceImage {
         &self.frames
     }
 
-    pub fn interaction_image(&self) -> &RgbaImage {
+    pub fn interaction_image(&self) -> &Arc<RgbaImage> {
         &self.interaction_image
     }
 
@@ -167,7 +168,12 @@ impl SourceImage {
             .map(|thumbnail| (thumbnail.texture.id(), thumbnail.size))
     }
 
-    pub fn select_frame(&mut self, ctx: &egui::Context, index: usize) -> yuetu_core::Result<bool> {
+    pub fn select_frame(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        upload_display_texture: bool,
+    ) -> yuetu_core::Result<bool> {
         if self.frames.len() <= 1 {
             return Ok(false);
         }
@@ -178,43 +184,80 @@ impl SourceImage {
 
         let image = self.frames[index].clone();
         let (display_image, display_size) = prepare_display(ctx, &image, self.rotation_deg)?;
-        let has_transparency = image_has_transparency(&display_image);
-        let texture_name = self.texture_name(index);
-        let texture = upload_texture(ctx, &texture_name, &display_image)?;
+        let interaction_image = prepare_interaction_from_display(&display_image)?;
+        if upload_display_texture {
+            let has_transparency = image_has_transparency(&display_image);
+            let texture_name = self.texture_name(index);
+            let texture = upload_texture(ctx, &texture_name, &display_image)?;
+            self.texture = texture;
+            self.has_transparency = has_transparency;
+            self.texture_dirty = false;
+        } else {
+            self.texture_dirty = true;
+        }
         self.image = image;
         self.display_image = display_image;
         self.display_size = display_size;
-        self.has_transparency = has_transparency;
+        self.interaction_image = interaction_image;
         self.frame_index = index;
-        self.texture = texture;
         Ok(true)
     }
 
     /// Change the source rotation. Only the selected frame is rotated here for
     /// the source stage; conversion rotates the selected frame in its worker
     /// and builds the shared palette from the unrotated sequence.
-    pub fn set_rotation(&mut self, ctx: &egui::Context, degrees: f32) -> yuetu_core::Result<bool> {
+    pub fn set_rotation(
+        &mut self,
+        ctx: &egui::Context,
+        degrees: f32,
+        upload_display_texture: bool,
+    ) -> yuetu_core::Result<bool> {
         let degrees = normalize_degrees(degrees);
         if (degrees - self.rotation_deg).abs() < 1e-4 {
             return Ok(false);
         }
 
         let (display_image, display_size) = prepare_display(ctx, &self.image, degrees)?;
-        let interaction_image = prepare_interaction(&self.image, degrees)?;
-        let has_transparency = image_has_transparency(&display_image);
-        let texture_name = self.texture_name(self.frame_index);
-        let texture = upload_texture(ctx, &texture_name, &display_image)?;
+        let interaction_image = prepare_interaction_from_display(&display_image)?;
+        if upload_display_texture {
+            let has_transparency = image_has_transparency(&display_image);
+            let texture_name = format!(
+                "source:{}:{}:{:.3}",
+                self.path.display(),
+                self.frame_index,
+                degrees
+            );
+            let texture = upload_texture(ctx, &texture_name, &display_image)?;
+            self.texture = texture;
+            self.has_transparency = has_transparency;
+            self.texture_dirty = false;
+        } else {
+            self.texture_dirty = true;
+        }
         self.display_image = display_image;
         self.display_size = display_size;
         self.interaction_image = interaction_image;
-        self.has_transparency = has_transparency;
         self.rotation_deg = degrees;
-        self.texture = texture;
         // Frame-strip thumbnails are cached in the old orientation.
         for thumbnail in &mut self.thumbnails {
             *thumbnail = None;
         }
         Ok(true)
+    }
+
+    /// Upload the current display image if frame scrubbing skipped it while
+    /// the source stage was hidden.
+    pub fn ensure_display_texture(&mut self, ctx: &egui::Context) -> yuetu_core::Result<()> {
+        if !self.texture_dirty {
+            return Ok(());
+        }
+        let has_transparency = image_has_transparency(&self.display_image);
+        let texture_name = self.texture_name(self.frame_index);
+        let texture = upload_texture(ctx, &texture_name, &self.display_image)?;
+        self.texture = texture;
+        self.has_transparency = has_transparency;
+        self.texture_dirty = false;
+        Ok(())
     }
 
     fn texture_name(&self, frame_index: usize) -> String {
@@ -229,15 +272,11 @@ impl SourceImage {
 
 fn prepare_display(
     ctx: &egui::Context,
-    image: &RgbaImage,
+    image: &Arc<RgbaImage>,
     degrees: f32,
 ) -> yuetu_core::Result<(Arc<RgbaImage>, (u32, u32))> {
     let degrees = normalize_degrees(degrees);
     let full_size = rotated_dimensions(image.width, image.height, degrees);
-    if degrees == 0.0 {
-        return Ok((Arc::new(image.clone()), full_size));
-    }
-
     let max_side = ctx
         .input(|input| input.max_texture_side)
         .clamp(256, MAX_TEXTURE_SIDE as usize) as u32;
@@ -245,34 +284,33 @@ fn prepare_display(
     let width = (image.width as f64 * scale).round().max(1.0) as u32;
     let height = (image.height as f64 * scale).round().max(1.0) as u32;
     let small = if width == image.width && height == image.height {
-        image.clone()
+        Arc::clone(image)
     } else {
-        resize(image, width, height, ResizeAlgorithm::Area)?
+        Arc::new(resize(image, width, height, ResizeAlgorithm::Area)?)
     };
+    if degrees == 0.0 {
+        return Ok((small, full_size));
+    }
     let rotated = rotate_image(&small, degrees)?;
     Ok((Arc::new(rotated), full_size))
 }
 
-fn prepare_interaction(image: &RgbaImage, degrees: f32) -> yuetu_core::Result<Arc<RgbaImage>> {
-    let degrees = normalize_degrees(degrees);
-    let full_size = rotated_dimensions(image.width, image.height, degrees);
-    if degrees == 0.0 && image.width.max(image.height) <= INTERACTION_MAX_SIDE {
-        return Ok(Arc::new(image.clone()));
+fn prepare_interaction_from_display(
+    display: &Arc<RgbaImage>,
+) -> yuetu_core::Result<Arc<RgbaImage>> {
+    let max_side = display.width.max(display.height);
+    if max_side <= INTERACTION_MAX_SIDE {
+        return Ok(Arc::clone(display));
     }
-
-    let scale = (INTERACTION_MAX_SIDE as f64 / full_size.0.max(full_size.1).max(1) as f64).min(1.0);
-    let width = (image.width as f64 * scale).round().max(1.0) as u32;
-    let height = (image.height as f64 * scale).round().max(1.0) as u32;
-    let small = if width == image.width && height == image.height {
-        image.clone()
-    } else {
-        resize(image, width, height, ResizeAlgorithm::Nearest)?
-    };
-    if degrees == 0.0 {
-        Ok(Arc::new(small))
-    } else {
-        rotate_image(&small, degrees).map(Arc::new)
-    }
+    let scale = INTERACTION_MAX_SIDE as f64 / f64::from(max_side.max(1));
+    let width = (f64::from(display.width) * scale).round().max(1.0) as u32;
+    let height = (f64::from(display.height) * scale).round().max(1.0) as u32;
+    Ok(Arc::new(resize(
+        display,
+        width,
+        height,
+        ResizeAlgorithm::Nearest,
+    )?))
 }
 
 fn upload_texture(
@@ -280,12 +318,32 @@ fn upload_texture(
     name: &str,
     image: &RgbaImage,
 ) -> yuetu_core::Result<TextureHandle> {
+    Ok(ctx.load_texture(
+        name,
+        texture_color_image(ctx, image)?,
+        display_texture_options(),
+    ))
+}
+
+fn update_texture(
+    texture: &mut TextureHandle,
+    ctx: &egui::Context,
+    image: &RgbaImage,
+) -> yuetu_core::Result<()> {
+    texture.set(texture_color_image(ctx, image)?, display_texture_options());
+    Ok(())
+}
+
+fn texture_color_image(
+    ctx: &egui::Context,
+    image: &RgbaImage,
+) -> yuetu_core::Result<egui::ColorImage> {
     // Never assume 4096: some backends (and egui's defaults) cap at 2048.
     // Loading a larger texture is a debug assertion/panic inside egui.
     let max_texture_side = ctx
         .input(|input| input.max_texture_side)
         .clamp(256, MAX_TEXTURE_SIDE as usize) as u32;
-    let display = if image.width.max(image.height) > max_texture_side {
+    if image.width.max(image.height) > max_texture_side {
         let scale = max_texture_side as f64 / f64::from(image.width.max(image.height));
         let width = (f64::from(image.width) * scale)
             .round()
@@ -293,16 +351,17 @@ fn upload_texture(
         let height = (f64::from(image.height) * scale)
             .round()
             .clamp(1.0, f64::from(max_texture_side)) as u32;
-        resize(image, width, height, ResizeAlgorithm::Area)?
+        let display = resize(image, width, height, ResizeAlgorithm::Area)?;
+        Ok(egui::ColorImage::from_rgba_unmultiplied(
+            [display.width as usize, display.height as usize],
+            display.as_rgba(),
+        ))
     } else {
-        image.clone()
-    };
-
-    let color_image = egui::ColorImage::from_rgba_unmultiplied(
-        [display.width as usize, display.height as usize],
-        display.as_rgba(),
-    );
-    Ok(ctx.load_texture(name, color_image, display_texture_options()))
+        Ok(egui::ColorImage::from_rgba_unmultiplied(
+            [image.width as usize, image.height as usize],
+            image.as_rgba(),
+        ))
+    }
 }
 
 fn display_texture_options() -> TextureOptions {
@@ -417,17 +476,24 @@ pub enum StageHover {
     },
 }
 
-pub struct StageSnapshot {
-    pub time_axis: TimeAxis,
-    pub resized_image: RgbaImage,
-    pub resized_texture: TextureHandle,
-    pub resized_has_transparency: bool,
-    pub resized_size: (u32, u32),
-    pub indexed_image: IndexedImage,
-    pub indexed_texture: TextureHandle,
-    pub indexed_has_transparency: bool,
-    pub keymap: KeyMap,
-    pub palette: Palette,
+/// Interaction-resolution image for the stage currently being scrubbed.
+/// Only the visible stage is built, so key-map scrubbing never pays for
+/// quantization and palette scrubbing never uploads a resized texture.
+pub enum StageSnapshot {
+    KeyMap {
+        time_axis: TimeAxis,
+        resized_image: RgbaImage,
+        resized_texture: TextureHandle,
+        resized_has_transparency: bool,
+        resized_size: (u32, u32),
+        keymap: KeyMap,
+    },
+    Palette {
+        indexed_image: IndexedImage,
+        indexed_texture: TextureHandle,
+        indexed_has_transparency: bool,
+        palette: Palette,
+    },
 }
 
 pub struct Preview {
@@ -519,6 +585,7 @@ impl Preview {
         full_source_size: (u32, u32),
         config: &ConversionConfig,
         palette: &Palette,
+        stage: PipelineStage,
     ) -> yuetu_core::Result<()> {
         let keymap = KeyMap::build(
             config.key_start,
@@ -536,24 +603,51 @@ impl Preview {
         );
         let target_size = config.time_axis.grid_size(key_count, time_rows);
         let resized = resize(image, target_size.0, target_size.1, config.resize)?;
-        let indexed = quantize(&resized, palette);
-        let resized_name = format!("stage:resized:interaction:{}", self.source_revision);
-        let resized_texture = upload_texture(ctx, &resized_name, &resized)?;
-        let indexed_rgba = indexed_to_rgba(&indexed, palette)?;
-        let indexed_name = format!("stage:indexed:interaction:{}", self.source_revision);
-        let indexed_texture = upload_texture(ctx, &indexed_name, &indexed_rgba)?;
 
-        self.interaction = Some(StageSnapshot {
-            time_axis: config.time_axis,
-            resized_has_transparency: image_has_transparency(&resized),
-            resized_image: resized,
-            resized_texture,
-            resized_size: target_size,
-            indexed_has_transparency: indexed.indices.iter().any(|&index| index < 0),
-            indexed_image: indexed,
-            indexed_texture,
-            keymap,
-            palette: palette.clone(),
+        self.interaction = Some(match stage {
+            PipelineStage::KeyMap => {
+                let texture = if let Some(StageSnapshot::KeyMap {
+                    resized_texture, ..
+                }) = self.interaction.as_ref()
+                {
+                    let mut texture = resized_texture.clone();
+                    update_texture(&mut texture, ctx, &resized)?;
+                    texture
+                } else {
+                    let name = format!("stage:resized:interaction:{}", self.source_revision);
+                    upload_texture(ctx, &name, &resized)?
+                };
+                StageSnapshot::KeyMap {
+                    time_axis: config.time_axis,
+                    resized_has_transparency: image_has_transparency(&resized),
+                    resized_image: resized,
+                    resized_texture: texture,
+                    resized_size: target_size,
+                    keymap,
+                }
+            }
+            PipelineStage::Palette => {
+                let indexed = quantize(&resized, palette);
+                let indexed_rgba = indexed_to_rgba(&indexed, palette)?;
+                let texture = if let Some(StageSnapshot::Palette {
+                    indexed_texture, ..
+                }) = self.interaction.as_ref()
+                {
+                    let mut texture = indexed_texture.clone();
+                    update_texture(&mut texture, ctx, &indexed_rgba)?;
+                    texture
+                } else {
+                    let name = format!("stage:indexed:interaction:{}", self.source_revision);
+                    upload_texture(ctx, &name, &indexed_rgba)?
+                };
+                StageSnapshot::Palette {
+                    indexed_has_transparency: indexed.indices.iter().any(|&index| index < 0),
+                    indexed_image: indexed,
+                    indexed_texture: texture,
+                    palette: palette.clone(),
+                }
+            }
+            PipelineStage::Source | PipelineStage::Midi => return Ok(()),
         });
         Ok(())
     }
@@ -638,7 +732,48 @@ impl Default for StatusMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::CoordinateOrigin;
+    use super::*;
+
+    #[test]
+    fn selecting_a_frame_updates_interaction_pixels_without_uploading_display() {
+        let ctx = egui::Context::default();
+        let red = Arc::new(RgbaImage::new(2, 2, Color::rgb(255, 0, 0)));
+        let blue = Arc::new(RgbaImage::new(2, 2, Color::rgb(0, 0, 255)));
+        let frames = vec![red.clone(), blue.clone()];
+        let image = frames[0].clone();
+        let (display_image, display_size) = prepare_display(&ctx, &image, 0.0).unwrap();
+        let interaction_image = prepare_interaction_from_display(&display_image).unwrap();
+        let texture = upload_texture(&ctx, "source-frame-test", &display_image).unwrap();
+        let mut source = SourceImage {
+            path: PathBuf::from("test.gif"),
+            name: "test.gif".to_owned(),
+            image,
+            display_image,
+            display_size,
+            interaction_image,
+            has_transparency: false,
+            frames,
+            delays_ms: vec![100, 100],
+            frame_index: 0,
+            rotation_deg: 0.0,
+            thumbnails: vec![None, None],
+            texture,
+            texture_dirty: false,
+        };
+
+        assert_eq!(
+            source.interaction_image().pixel(0, 0),
+            Some(Color::rgb(255, 0, 0))
+        );
+        assert!(source.select_frame(&ctx, 1, false).unwrap());
+        assert_eq!(
+            source.interaction_image().pixel(0, 0),
+            Some(Color::rgb(0, 0, 255))
+        );
+        assert!(source.texture_dirty);
+        source.ensure_display_texture(&ctx).unwrap();
+        assert!(!source.texture_dirty);
+    }
 
     #[test]
     fn bottom_left_origin_flips_the_displayed_row() {

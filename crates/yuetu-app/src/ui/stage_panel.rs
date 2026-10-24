@@ -3,7 +3,9 @@ use egui_extras::{Size, StripBuilder};
 use yuetu_core::{Color, MidiOutputConfig, TimeAxis};
 
 use crate::jobs::ProgressView;
-use crate::state::{CoordinateOrigin, PipelineStage, Preview, SourceImage, StageHover};
+use crate::state::{
+    CoordinateOrigin, PipelineStage, Preview, SourceImage, StageHover, StageSnapshot,
+};
 use crate::theme;
 use crate::widgets::{View2D, midi_preview, stage_image};
 
@@ -63,14 +65,22 @@ pub fn show(
             match stage {
                 PipelineStage::KeyMap => {
                     let (texture, size, time_axis, transparency, image, keymap) =
-                        if let Some(stage) = preview.interaction.as_ref() {
+                        if let Some(StageSnapshot::KeyMap {
+                            time_axis,
+                            resized_image,
+                            resized_texture,
+                            resized_has_transparency,
+                            resized_size,
+                            keymap,
+                        }) = preview.interaction.as_ref()
+                        {
                             (
-                                stage.resized_texture.id(),
-                                stage.resized_size,
-                                stage.time_axis,
-                                stage.resized_has_transparency,
-                                &stage.resized_image,
-                                &stage.keymap,
+                                resized_texture.id(),
+                                *resized_size,
+                                *time_axis,
+                                *resized_has_transparency,
+                                resized_image,
+                                keymap,
                             )
                         } else {
                             (
@@ -110,13 +120,19 @@ pub fn show(
                 }
                 PipelineStage::Palette => {
                     let (texture, size, transparency, indexed, palette) =
-                        if let Some(stage) = preview.interaction.as_ref() {
+                        if let Some(StageSnapshot::Palette {
+                            indexed_image,
+                            indexed_texture,
+                            indexed_has_transparency,
+                            palette,
+                        }) = preview.interaction.as_ref()
+                        {
                             (
-                                stage.indexed_texture.id(),
-                                (stage.indexed_image.width, stage.indexed_image.height),
-                                stage.indexed_has_transparency,
-                                &stage.indexed_image,
-                                &stage.palette,
+                                indexed_texture.id(),
+                                (indexed_image.width, indexed_image.height),
+                                *indexed_has_transparency,
+                                indexed_image,
+                                palette,
                             )
                         } else {
                             (

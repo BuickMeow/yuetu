@@ -356,7 +356,7 @@ impl YuetuApp {
             let Some(source) = self.source.as_mut() else {
                 return false;
             };
-            match source.select_frame(ctx, frame) {
+            match source.select_frame(ctx, frame, self.stage == PipelineStage::Source) {
                 Ok(true) => true,
                 Ok(false) => false,
                 Err(error) => {
@@ -393,8 +393,9 @@ impl YuetuApp {
         let Some(source) = self.source.as_ref() else {
             return;
         };
-        let image = source.interaction_image().clone();
+        let image = std::sync::Arc::clone(source.interaction_image());
         let full_source_size = source.display_size;
+        let stage = self.stage;
         let config = self.settings.conversion_config();
         let Some(preview) = self.preview.as_mut() else {
             return;
@@ -408,9 +409,14 @@ impl YuetuApp {
         let mut preview_config = config;
         preview_config.rotation_deg = 0.0;
         let palette = preview.result.palette.clone();
-        if let Err(error) =
-            preview.update_scrub_frame(ctx, &image, full_source_size, &preview_config, &palette)
-        {
+        if let Err(error) = preview.update_scrub_frame(
+            ctx,
+            image.as_ref(),
+            full_source_size,
+            &preview_config,
+            &palette,
+            stage,
+        ) {
             tracing::warn!("failed to build scrub preview: {error}");
         }
     }
@@ -749,6 +755,14 @@ impl eframe::App for YuetuApp {
             if stage != self.stage {
                 self.stage = stage;
                 self.stage_hover = None;
+                if stage == PipelineStage::Source {
+                    if let Some(source) = self.source.as_mut() {
+                        if let Err(error) = source.ensure_display_texture(&ctx) {
+                            self.status =
+                                StatusMessage::error(format!("刷新源图纹理失败：{error}"));
+                        }
+                    }
+                }
                 if stage == PipelineStage::Midi {
                     if !self.ensure_preview_notes() && !self.jobs.is_running() {
                         self.schedule_auto_conversion(&ctx, Duration::ZERO);
@@ -844,7 +858,7 @@ impl eframe::App for YuetuApp {
             let live = controls_action.rotation_dragging
                 || ctx.input(|input| input.pointer.primary_down());
             if let Some(source) = self.source.as_mut() {
-                match source.set_rotation(&ctx, degrees) {
+                match source.set_rotation(&ctx, degrees, self.stage == PipelineStage::Source) {
                     Ok(true) => {
                         self.source_revision = self.source_revision.wrapping_add(1);
                         self.stage_hover = None;
@@ -875,7 +889,7 @@ impl eframe::App for YuetuApp {
             self.settings = Settings::default();
             self.coordinate_origin = CoordinateOrigin::BottomLeft;
             if let Some(source) = self.source.as_mut() {
-                match source.set_rotation(&ctx, 0.0) {
+                match source.set_rotation(&ctx, 0.0, self.stage == PipelineStage::Source) {
                     Ok(true) => {
                         self.source_revision = self.source_revision.wrapping_add(1);
                         self.source_view.reset_fit();
