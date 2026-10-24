@@ -302,29 +302,58 @@ impl YuetuApp {
     /// suspends conversion until the drag ends. This is what makes intermediate
     /// frames visible without spending the whole gesture on cancelled jobs.
     fn select_source_frame(&mut self, ctx: &egui::Context, frame: usize, live: bool) -> bool {
-        let Some(source) = self.source.as_mut() else {
-            return false;
-        };
-        match source.select_frame(ctx, frame) {
-            Ok(true) => {
-                self.source_revision = self.source_revision.wrapping_add(1);
-                self.stage_hover = None;
-                if live {
-                    self.suspend_conversion_for_scrub();
-                    self.frame_scrub_pending = true;
-                    self.status = StatusMessage::info("浏览帧…");
-                } else {
-                    self.frame_scrub_pending = false;
-                    self.status = StatusMessage::info("正在更新预览…");
-                    self.schedule_auto_conversion(ctx, AUTO_CONVERT_DEBOUNCE);
+        let changed = {
+            let Some(source) = self.source.as_mut() else {
+                return false;
+            };
+            match source.select_frame(ctx, frame) {
+                Ok(true) => true,
+                Ok(false) => false,
+                Err(error) => {
+                    self.status = StatusMessage::error(format!("切换帧失败：{error}"));
+                    false
                 }
-                true
             }
-            Ok(false) => false,
-            Err(error) => {
-                self.status = StatusMessage::error(format!("切换帧失败：{error}"));
-                false
+        };
+        if !changed {
+            return false;
+        }
+
+        self.source_revision = self.source_revision.wrapping_add(1);
+        self.stage_hover = None;
+        if live {
+            self.suspend_conversion_for_scrub();
+            self.frame_scrub_pending = true;
+            self.status = StatusMessage::info("浏览帧…");
+            if matches!(self.stage, PipelineStage::KeyMap | PipelineStage::Palette) {
+                self.update_scrub_preview();
             }
+        } else {
+            self.frame_scrub_pending = false;
+            self.status = StatusMessage::info("正在更新预览…");
+            self.schedule_auto_conversion(ctx, AUTO_CONVERT_DEBOUNCE);
+        }
+        true
+    }
+
+    /// Refresh only the resized/indexed images while scrubbing. This bypasses
+    /// the background conversion so the key-map and palette stages follow the
+    /// pointer without recomputing notes.
+    fn update_scrub_preview(&mut self) {
+        let Some(source) = self.source.as_ref() else {
+            return;
+        };
+        let image = source.image.clone();
+        let config = self.settings.conversion_config();
+        let Some(preview) = self.preview.as_mut() else {
+            return;
+        };
+        if preview.config != config {
+            return;
+        }
+        let palette = preview.result.palette.clone();
+        if let Err(error) = preview.update_scrub_frame(&image, &config, &palette) {
+            tracing::warn!("failed to build scrub preview: {error}");
         }
     }
 

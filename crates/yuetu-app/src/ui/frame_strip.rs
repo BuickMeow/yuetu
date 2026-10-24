@@ -8,7 +8,7 @@
 //! app can show intermediate source frames without restarting conversion for
 //! every pixel of the scrub gesture.
 
-use egui::scroll_area::ScrollBarVisibility;
+use egui::scroll_area::{DragScroll, ScrollBarVisibility, ScrollSource};
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui};
 use egui_extras::{Size, StripBuilder};
 use egui_material_icons::MaterialIcon;
@@ -132,6 +132,10 @@ fn show_thumbnails(
         .id_salt("frame_strip_scroll")
         .auto_shrink([false, true])
         .scroll_bar_visibility(scroll_bar_visibility)
+        .scroll_source(ScrollSource {
+            drag: DragScroll::Never,
+            ..Default::default()
+        })
         .show_viewport(ui, |ui, viewport| {
             let (content_rect, response) = ui.allocate_exact_size(
                 egui::vec2(total_width, THUMBNAIL_CELL_HEIGHT),
@@ -239,6 +243,10 @@ fn show_timeline(
         .id_salt("frame_timeline_scroll")
         .auto_shrink([false, true])
         .scroll_bar_visibility(scroll_bar_visibility)
+        .scroll_source(ScrollSource {
+            drag: DragScroll::Never,
+            ..Default::default()
+        })
         .show_viewport(ui, |ui, viewport| {
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(total_width, TIMELINE_HEIGHT),

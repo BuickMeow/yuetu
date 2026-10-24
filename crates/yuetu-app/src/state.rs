@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use yuetu_core::resize::resize;
 use yuetu_core::{
-    Color, ConversionConfig, ConversionResult, ImageSequence, IndexedImage, Palette,
-    ResizeAlgorithm, RgbaImage, load_image_sequence, normalize_degrees, rotate_image,
+    Color, ConversionConfig, ConversionResult, ImageSequence, IndexedImage, KeyMap, Palette,
+    ResizeAlgorithm, RgbaImage, load_image_sequence, normalize_degrees, quantize, rotate_image,
 };
 
 use crate::widgets::midi_gpu::MidiGpuData;
@@ -225,14 +225,17 @@ fn upload_texture(
         [display.width as usize, display.height as usize],
         display.as_rgba(),
     );
+    Ok(ctx.load_texture(name, color_image, display_texture_options()))
+}
+
+fn display_texture_options() -> TextureOptions {
     // Crisp texels when zoomed in, smooth reduction when zoomed out.
-    let options = TextureOptions {
+    TextureOptions {
         magnification: TextureFilter::Nearest,
         minification: TextureFilter::Linear,
         wrap_mode: TextureWrapMode::ClampToEdge,
         mipmap_mode: None,
-    };
-    Ok(ctx.load_texture(name, color_image, options))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -388,6 +391,80 @@ impl Preview {
             indexed_has_transparency,
             midi_gpu,
         })
+    }
+
+    /// Fast intermediate image refresh used while scrubbing frames on the
+    /// key-map or palette stage. This deliberately uses nearest-neighbor
+    /// resizing: it is only a transient preview; the final conversion uses the
+    /// configured resize algorithm. Notes and MIDI instances stay untouched.
+    pub fn update_scrub_frame(
+        &mut self,
+        image: &RgbaImage,
+        config: &ConversionConfig,
+        palette: &Palette,
+    ) -> yuetu_core::Result<()> {
+        let keymap = KeyMap::build(
+            config.key_start,
+            config.key_end,
+            config.key_filter,
+            config.column_mapping,
+        )?;
+
+        let rotated = if normalize_degrees(config.rotation_deg) == 0.0 {
+            None
+        } else {
+            Some(rotate_image(image, config.rotation_deg)?)
+        };
+        let source = rotated.as_ref().unwrap_or(image);
+        let target_width = keymap.width().max(1);
+        let target_height = if config.target_height > 0 {
+            config.target_height
+        } else {
+            ((source.height as f64) * (target_width as f64) / (source.width as f64))
+                .round()
+                .max(1.0) as u32
+        };
+
+        let resized = resize(
+            source,
+            target_width,
+            target_height,
+            ResizeAlgorithm::Nearest,
+        )?;
+        let indexed = quantize(&resized, palette);
+
+        let indexed_rgba = indexed_to_rgba(&indexed, palette)?;
+        self.resized_texture.set(
+            egui::ColorImage::from_rgba_unmultiplied(
+                [resized.width as usize, resized.height as usize],
+                resized.as_rgba(),
+            ),
+            display_texture_options(),
+        );
+        self.indexed_texture.set(
+            egui::ColorImage::from_rgba_unmultiplied(
+                [indexed_rgba.width as usize, indexed_rgba.height as usize],
+                indexed_rgba.as_rgba(),
+            ),
+            display_texture_options(),
+        );
+
+        self.result.keymap = keymap;
+        self.result.key_start = config.key_start;
+        self.result.key_end = config.key_end;
+        self.result.palette = palette.clone();
+        self.result.source_size = (source.width, source.height);
+        self.result.resized_size = (target_width, target_height);
+        self.result.resized_image = resized;
+        self.result.indexed_image = indexed;
+        self.resized_has_transparency = image_has_transparency(&self.result.resized_image);
+        self.indexed_has_transparency = self
+            .result
+            .indexed_image
+            .indices
+            .iter()
+            .any(|&index| index < 0);
+        Ok(())
     }
 }
 
