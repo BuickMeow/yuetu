@@ -38,6 +38,7 @@ pub const RADIUS_MD: CornerRadius = CornerRadius::same(10);
 #[derive(Clone, Copy)]
 pub enum PanelKind {
     Bottom,
+    FrameStrip,
     Side,
     Central,
 }
@@ -121,6 +122,18 @@ pub fn panel_frame(ui: &Ui, kind: PanelKind) -> Frame {
                 top: 0,
                 bottom: 8,
             }),
+            PanelKind::FrameStrip => {
+                Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(Margin {
+                        left: 0,
+                        right: 0,
+                        top: 8,
+                        // The central panel's own bottom margin separates the
+                        // strip from the status bar.
+                        bottom: 0,
+                    })
+            }
             PanelKind::Side => Frame::side_top_panel(ui.style()).inner_margin(Margin {
                 left: 8,
                 right: 8,
@@ -136,6 +149,12 @@ pub fn panel_frame(ui: &Ui, kind: PanelKind) -> Frame {
             right: 12,
             top: 0,
             bottom: 12,
+        }),
+        PanelKind::FrameStrip => Frame::new().fill(BG_PANEL).inner_margin(Margin {
+            left: 0,
+            right: 0,
+            top: 8,
+            bottom: 0,
         }),
         PanelKind::Side => Frame::new().fill(BG_PANEL).inner_margin(Margin::same(12)),
         PanelKind::Central => Frame::new().fill(BG_PANEL).inner_margin(Margin::same(10)),

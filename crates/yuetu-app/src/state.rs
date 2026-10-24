@@ -14,6 +14,14 @@ use crate::widgets::midi_gpu::MidiGpuData;
 /// Longest side of the texture uploaded to the GPU. The conversion still uses
 /// the full-resolution CPU image; this is display-only.
 const MAX_TEXTURE_SIDE: u32 = 4096;
+/// Longest side of a frame-strip thumbnail before rotation. Small enough that
+/// generating a few visible thumbnails while scrolling is cheap.
+const THUMBNAIL_MAX_SIDE: u32 = 96;
+
+struct Thumbnail {
+    texture: TextureHandle,
+    size: egui::Vec2,
+}
 
 pub struct SourceImage {
     pub path: PathBuf,
@@ -28,6 +36,7 @@ pub struct SourceImage {
     delays_ms: Vec<u32>,
     frame_index: usize,
     rotation_deg: f32,
+    thumbnails: Vec<Option<Thumbnail>>,
     pub texture: TextureHandle,
 }
 
@@ -46,6 +55,7 @@ impl SourceImage {
             .and_then(|name| name.to_str())
             .unwrap_or("image")
             .to_owned();
+        let thumbnail_count = frames.len();
 
         Ok(Self {
             path,
@@ -57,6 +67,9 @@ impl SourceImage {
             delays_ms,
             frame_index: 0,
             rotation_deg: 0.0,
+            thumbnails: std::iter::repeat_with(|| None)
+                .take(thumbnail_count)
+                .collect(),
             texture,
         })
     }
@@ -79,6 +92,46 @@ impl SourceImage {
 
     pub fn rotation_deg(&self) -> f32 {
         self.rotation_deg
+    }
+
+    /// Lazily build a small display texture for the frame strip. Only visible
+    /// cells ask for thumbnails, so a 1000-frame GIF does not upload 1000
+    /// textures up front.
+    pub fn thumbnail(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+    ) -> Option<(egui::TextureId, egui::Vec2)> {
+        let index = index.min(self.frames.len().checked_sub(1)?);
+        if self.thumbnails[index].is_none() {
+            let frame = self.frames.get(index)?;
+            let scale = (THUMBNAIL_MAX_SIDE as f32 / frame.width.max(1) as f32)
+                .min(THUMBNAIL_MAX_SIDE as f32 / frame.height.max(1) as f32)
+                .min(1.0);
+            let width = (frame.width as f32 * scale).round().max(1.0) as u32;
+            let height = (frame.height as f32 * scale).round().max(1.0) as u32;
+            let small = resize(frame, width, height, ResizeAlgorithm::Nearest).ok()?;
+            let rotated = if normalize_degrees(self.rotation_deg) == 0.0 {
+                small
+            } else {
+                rotate_image(&small, self.rotation_deg).ok()?
+            };
+            let name = format!(
+                "thumb:{}:{}:{:.2}",
+                self.path.display(),
+                index,
+                self.rotation_deg
+            );
+            let texture = upload_texture(ctx, &name, &rotated).ok()?;
+            self.thumbnails[index] = Some(Thumbnail {
+                texture,
+                size: egui::vec2(rotated.width as f32, rotated.height as f32),
+            });
+        }
+
+        self.thumbnails[index]
+            .as_ref()
+            .map(|thumbnail| (thumbnail.texture.id(), thumbnail.size))
     }
 
     pub fn select_frame(&mut self, ctx: &egui::Context, index: usize) -> yuetu_core::Result<bool> {
@@ -120,6 +173,10 @@ impl SourceImage {
         self.has_transparency = has_transparency;
         self.rotation_deg = degrees;
         self.texture = texture;
+        // Frame-strip thumbnails are cached in the old orientation.
+        for thumbnail in &mut self.thumbnails {
+            *thumbnail = None;
+        }
         Ok(true)
     }
 

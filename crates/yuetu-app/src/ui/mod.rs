@@ -1,4 +1,5 @@
 pub mod controls;
+pub mod frame_strip;
 pub mod stage_panel;
 pub mod status_bar;
 

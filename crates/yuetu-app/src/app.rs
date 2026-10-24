@@ -30,6 +30,7 @@ pub struct YuetuApp {
     stage_stops: Vec<StageStop>,
     stage_hover: Option<StageHover>,
     coordinate_origin: CoordinateOrigin,
+    frame_strip_last_frame: usize,
     checker_texture: egui::TextureHandle,
     gpu_target_format: eframe::wgpu::TextureFormat,
     source_view: View2D,
@@ -71,6 +72,7 @@ impl YuetuApp {
             stage_stops: Vec::new(),
             stage_hover: None,
             coordinate_origin: CoordinateOrigin::TopLeft,
+            frame_strip_last_frame: 0,
             checker_texture,
             gpu_target_format,
             source_view: View2D::default(),
@@ -127,6 +129,7 @@ impl YuetuApp {
                 self.preview = None;
                 self.stage = PipelineStage::Source;
                 self.stage_hover = None;
+                self.frame_strip_last_frame = 0;
                 self.source_view.reset_fit();
                 self.key_view.reset_fit();
                 self.palette_view.reset_fit();
@@ -246,6 +249,27 @@ impl YuetuApp {
         self.job_source_revision = None;
         self.job_started = None;
         self.status = StatusMessage::warning("已取消生成");
+    }
+
+    /// Select a GIF/WebP frame from the sidebar or the frame strip.
+    fn select_source_frame(&mut self, ctx: &egui::Context, frame: usize) -> bool {
+        let Some(source) = self.source.as_mut() else {
+            return false;
+        };
+        match source.select_frame(ctx, frame) {
+            Ok(true) => {
+                self.source_revision = self.source_revision.wrapping_add(1);
+                self.stage_hover = None;
+                self.status = StatusMessage::info("正在更新预览…");
+                self.schedule_auto_conversion(ctx, AUTO_CONVERT_DEBOUNCE);
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                self.status = StatusMessage::error(format!("切换帧失败：{error}"));
+                false
+            }
+        }
     }
 
     fn poll_jobs(&mut self, ctx: &egui::Context) {
@@ -506,9 +530,25 @@ impl eframe::App for YuetuApp {
         let checker_texture = self.checker_texture.id();
         let gpu_target_format = self.gpu_target_format;
         let mut stage_action = ui::stage_panel::Action::default();
+        let mut frame_strip_action = None;
         egui::CentralPanel::default()
             .frame(theme::panel_frame(ui, theme::PanelKind::Central))
             .show(ui, |ui| {
+                // The frame strip lives inside the central panel so it spans
+                // only the stage width, directly below the main view. It is
+                // absent for still images.
+                if let Some(source) = self.source.as_mut() {
+                    if source.frame_count() > 1 {
+                        let last_frame = &mut self.frame_strip_last_frame;
+                        egui::Panel::bottom("frame_strip")
+                            .show_separator_line(false)
+                            .frame(theme::panel_frame(ui, theme::PanelKind::FrameStrip))
+                            .show(ui, |ui| {
+                                frame_strip_action = ui::frame_strip::show(ui, source, last_frame);
+                            });
+                    }
+                }
+
                 let stage = self.stage;
                 let source = self.source.as_ref();
                 let preview = self.preview.as_ref();
@@ -558,21 +598,10 @@ impl eframe::App for YuetuApp {
             acted = true;
         }
         if let Some(frame) = controls_action.frame {
-            if let Some(source) = self.source.as_mut() {
-                match source.select_frame(&ctx, frame) {
-                    Ok(true) => {
-                        self.source_revision = self.source_revision.wrapping_add(1);
-                        self.stage_hover = None;
-                        self.status = StatusMessage::info("正在更新预览…");
-                        self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
-                        acted = true;
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        self.status = StatusMessage::error(format!("切换帧失败：{error}"));
-                    }
-                }
-            }
+            acted |= self.select_source_frame(&ctx, frame);
+        }
+        if let Some(frame) = frame_strip_action {
+            acted |= self.select_source_frame(&ctx, frame);
         }
         if let Some(degrees) = controls_action.rotation {
             if let Some(source) = self.source.as_mut() {

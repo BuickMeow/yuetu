@@ -133,6 +133,7 @@ settings: Settings            // UI 参数（含旋转、色板范围）
 stage: PipelineStage          // 当前流水线阶段
 stage_stops: Vec<StageStop>   // 左侧卡片中心，供图标滑块吸附
 coordinate_origin             // 标尺/悬停坐标原点：左上角或左下角
+frame_strip_last_frame        // 帧条上次选中的帧，用于外部选帧时自动滚入视野
 source/key/palette/midi_view  // 每个阶段独立的 View2D
 status / hover                // 一帧内的展示信息
 ```
@@ -222,7 +223,18 @@ MIDI 阶段的坐标单位是“列 × pixel-tick”，不是屏幕像素；因�
 
 左侧面板和中央面板的 content 顶部边距都统一为 8px；底部栏自身不再加 top margin，由中央面板的 bottom margin 提供视觉间距。
 
-### 5.7 HiDPI
+### 5.7 动图帧条
+
+`SourceImage.frame_count() > 1` 时，中央视图底部出现一条横向帧条（内嵌在 CentralPanel 内，因此只占主视图宽度，不跨左侧面板）：
+
+- 每帧一个固定宽度 cell，显示缩略图、帧号；
+- 当前帧用底部色带区分，不画边框；
+- 点击 cell 选帧，和左侧“帧”DragValue 共用 `select_source_frame()` 路径，会递增 `source_revision` 并自动重生成预览；
+- 帧数超出宽度时显示横向滚动条；短动画不显示滚动条；
+- 缩略图按需生成（只生成可见 cell），旋转变化时清空缓存；最多缓存已经看过的帧；
+- 外部选帧（例如 DragValue 跳到第 30 帧）时，帧条自动把该帧滚入视野。
+
+### 5.8 HiDPI
 
 eframe / egui / wgpu 已经处理窗口的 `pixels_per_point`：布局、字体、描边、标尺、命中区和四个 `View2D` 全部使用逻辑点，上传给 GPU 的纹理使用图像实际像素。唯一相关的是从 `ctx.input(|i| i.max_texture_side)` 读取纹理上限，避免超过后端限制。Retina 2x 下已验证。
 
@@ -253,6 +265,7 @@ eframe::Renderer::Wgpu
 - [x] 转换移到后台线程：`JobRunner` + `JobEvent` + 分阶段进度 + 协作式取消；
 - [x] 参数变化自动重新生成预览（80 ms debounce，无手动生成按钮）；
 - [x] GIF / 动态 WebP 逐帧选择，切帧自动更新预览；
+- [x] 主视图下方横向帧条：缩略图、点击选帧、当前帧色带、横向滚动、按需生成缩略图；
 - [x] 多帧共享调色板：按帧延迟加权直方图 + 加权 K-Means++；
 - [x] 原图旋转（任意角度，源图阶段实时显示，转换在 worker 中执行）；
 - [x] 标尺/悬停坐标原点切换（左上角 / 左下角）；
