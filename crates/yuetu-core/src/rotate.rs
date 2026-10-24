@@ -25,6 +25,29 @@ pub fn normalize_degrees(degrees: f32) -> f32 {
     if angle.abs() < EPSILON { 0.0 } else { angle }
 }
 
+/// Dimensions of the expanded canvas after rotation, without rotating pixels.
+pub fn rotated_dimensions(width: u32, height: u32, degrees: f32) -> (u32, u32) {
+    let angle = normalize_degrees(degrees);
+    if angle == 0.0 || (angle - 180.0).abs() < EPSILON {
+        return (width.max(1), height.max(1));
+    }
+    if (angle - 90.0).abs() < EPSILON || (angle + 90.0).abs() < EPSILON {
+        return (height.max(1), width.max(1));
+    }
+
+    let radians = f64::from(angle).to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let source_width = f64::from(width.max(1));
+    let source_height = f64::from(height.max(1));
+    let output_width = (source_width * cos.abs() + source_height * sin.abs())
+        .ceil()
+        .max(1.0) as u32;
+    let output_height = (source_width * sin.abs() + source_height * cos.abs())
+        .ceil()
+        .max(1.0) as u32;
+    (output_width, output_height)
+}
+
 pub fn rotate_image(image: &RgbaImage, degrees: f32) -> Result<RgbaImage> {
     if image.is_empty() {
         return Err(Error::InvalidImage("源图为空".into()));
@@ -221,6 +244,15 @@ mod tests {
         let rotated = rotate_image(&quad(), 180.0).unwrap();
         assert_eq!(rotated.pixel(0, 0), Some(Color::rgb(255, 255, 255)));
         assert_eq!(rotated.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn rotated_dimensions_match_the_expanded_canvas() {
+        assert_eq!(rotated_dimensions(200, 100, 0.0), (200, 100));
+        assert_eq!(rotated_dimensions(200, 100, 90.0), (100, 200));
+        assert_eq!(rotated_dimensions(200, 100, 180.0), (200, 100));
+        assert_eq!(rotated_dimensions(200, 100, 270.0), (100, 200));
+        assert_eq!(rotated_dimensions(2, 2, 45.0), (3, 3));
     }
 
     #[test]

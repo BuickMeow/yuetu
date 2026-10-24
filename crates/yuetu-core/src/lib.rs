@@ -46,4 +46,4 @@ pub use palette::Palette;
 pub use progress::{Progress, Stage};
 pub use quantize::{IndexedImage, TRANSPARENT_ID, quantize, quantize_with_progress};
 pub use resize::ResizeAlgorithm;
-pub use rotate::{normalize_degrees, rotate_image};
+pub use rotate::{normalize_degrees, rotate_image, rotated_dimensions};

@@ -7,6 +7,7 @@ use yuetu_core::resize::resize;
 use yuetu_core::{
     Color, ConversionConfig, ConversionResult, ImageSequence, IndexedImage, KeyMap, Palette,
     ResizeAlgorithm, RgbaImage, load_image_sequence, normalize_degrees, quantize, rotate_image,
+    rotated_dimensions,
 };
 
 use crate::widgets::midi_gpu::MidiGpuData;
@@ -29,8 +30,11 @@ pub struct SourceImage {
     /// The currently selected frame, before rotation. Conversion applies
     /// `rotation_deg` in the worker so changing the angle never blocks the UI.
     pub image: Arc<RgbaImage>,
-    /// Rotated selected frame used by the source stage and its rulers.
+    /// Rotated selected frame used by the source stage. For large rotations
+    /// this may be a display-sized preview; `display_size` is the full canvas.
     pub display_image: Arc<RgbaImage>,
+    /// Full rotated canvas dimensions, used by rulers and hit-testing.
+    pub display_size: (u32, u32),
     pub has_transparency: bool,
     frames: Vec<Arc<RgbaImage>>,
     delays_ms: Vec<u32>,
@@ -46,6 +50,7 @@ impl SourceImage {
         let frames: Vec<Arc<RgbaImage>> = frames.into_iter().map(Arc::new).collect();
         let image = frames[0].clone();
         let display_image = image.clone();
+        let display_size = (image.width, image.height);
         let has_transparency = image_has_transparency(&display_image);
         let texture_name = format!("source:{}:0", path.display());
         let texture = upload_texture(ctx, &texture_name, &display_image)?;
@@ -62,6 +67,7 @@ impl SourceImage {
             name,
             image,
             display_image,
+            display_size,
             has_transparency,
             frames,
             delays_ms,
@@ -92,6 +98,25 @@ impl SourceImage {
 
     pub fn rotation_deg(&self) -> f32 {
         self.rotation_deg
+    }
+
+    /// Sample the display preview using full-canvas pixel coordinates.
+    pub fn display_pixel(&self, x: u32, y: u32) -> Color {
+        let (full_width, full_height) = self.display_size;
+        if full_width == 0 || full_height == 0 || x >= full_width || y >= full_height {
+            return Color::TRANSPARENT;
+        }
+        let preview_width = self.display_image.width.max(1);
+        let preview_height = self.display_image.height.max(1);
+        let sx = (((x as f64 + 0.5) * f64::from(preview_width) / f64::from(full_width)).floor()
+            as u32)
+            .min(preview_width - 1);
+        let sy = (((y as f64 + 0.5) * f64::from(preview_height) / f64::from(full_height)).floor()
+            as u32)
+            .min(preview_height - 1);
+        self.display_image
+            .pixel(sx, sy)
+            .unwrap_or(Color::TRANSPARENT)
     }
 
     /// Lazily build a small display texture for the frame strip. Only visible
@@ -144,12 +169,13 @@ impl SourceImage {
         }
 
         let image = self.frames[index].clone();
-        let display_image = rotate_for_display(&image, self.rotation_deg)?;
+        let (display_image, display_size) = prepare_display(ctx, &image, self.rotation_deg)?;
         let has_transparency = image_has_transparency(&display_image);
         let texture_name = self.texture_name(index);
         let texture = upload_texture(ctx, &texture_name, &display_image)?;
         self.image = image;
         self.display_image = display_image;
+        self.display_size = display_size;
         self.has_transparency = has_transparency;
         self.frame_index = index;
         self.texture = texture;
@@ -165,11 +191,12 @@ impl SourceImage {
             return Ok(false);
         }
 
-        let display_image = rotate_for_display(&self.image, degrees)?;
+        let (display_image, display_size) = prepare_display(ctx, &self.image, degrees)?;
         let has_transparency = image_has_transparency(&display_image);
         let texture_name = self.texture_name(self.frame_index);
         let texture = upload_texture(ctx, &texture_name, &display_image)?;
         self.display_image = display_image;
+        self.display_size = display_size;
         self.has_transparency = has_transparency;
         self.rotation_deg = degrees;
         self.texture = texture;
@@ -190,12 +217,30 @@ impl SourceImage {
     }
 }
 
-fn rotate_for_display(image: &RgbaImage, degrees: f32) -> yuetu_core::Result<Arc<RgbaImage>> {
-    if normalize_degrees(degrees) == 0.0 {
-        Ok(Arc::new(image.clone()))
-    } else {
-        rotate_image(image, degrees).map(Arc::new)
+fn prepare_display(
+    ctx: &egui::Context,
+    image: &RgbaImage,
+    degrees: f32,
+) -> yuetu_core::Result<(Arc<RgbaImage>, (u32, u32))> {
+    let degrees = normalize_degrees(degrees);
+    let full_size = rotated_dimensions(image.width, image.height, degrees);
+    if degrees == 0.0 {
+        return Ok((Arc::new(image.clone()), full_size));
     }
+
+    let max_side = ctx
+        .input(|input| input.max_texture_side)
+        .clamp(256, MAX_TEXTURE_SIDE as usize) as u32;
+    let scale = (max_side as f64 / full_size.0.max(full_size.1).max(1) as f64).min(1.0);
+    let width = (image.width as f64 * scale).round().max(1.0) as u32;
+    let height = (image.height as f64 * scale).round().max(1.0) as u32;
+    let small = if width == image.width && height == image.height {
+        image.clone()
+    } else {
+        resize(image, width, height, ResizeAlgorithm::Area)?
+    };
+    let rotated = rotate_image(&small, degrees)?;
+    Ok((Arc::new(rotated), full_size))
 }
 
 fn upload_texture(

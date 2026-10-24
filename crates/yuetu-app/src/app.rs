@@ -145,7 +145,7 @@ impl YuetuApp {
                 self.settings.rotation_deg = 0.0;
                 self.status = StatusMessage::success(format!(
                     "已加载 {} · {} × {} px",
-                    source.name, source.display_image.width, source.display_image.height
+                    source.name, source.display_size.0, source.display_size.1
                 ));
                 self.source = Some(source);
                 self.source_revision = self.source_revision.wrapping_add(1);
@@ -343,7 +343,7 @@ impl YuetuApp {
         let Some(source) = self.source.as_ref() else {
             return;
         };
-        let image = source.image.clone();
+        let image = source.display_image.clone();
         let config = self.settings.conversion_config();
         let Some(preview) = self.preview.as_mut() else {
             return;
@@ -351,8 +351,13 @@ impl YuetuApp {
         if preview.config != config {
             return;
         }
+        // `display_image` is already rotated for the source stage. Avoid
+        // rotating the full-resolution frame again just to rebuild a 128px
+        // preview.
+        let mut preview_config = config;
+        preview_config.rotation_deg = 0.0;
         let palette = preview.result.palette.clone();
-        if let Err(error) = preview.update_scrub_frame(&image, &config, &palette) {
+        if let Err(error) = preview.update_scrub_frame(&image, &preview_config, &palette) {
             tracing::warn!("failed to build scrub preview: {error}");
         }
     }

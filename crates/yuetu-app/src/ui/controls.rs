@@ -53,8 +53,8 @@ pub fn show(
                     if source.frame_count() > 1 {
                         ui.label(format!(
                             "{} × {} px · {} 帧",
-                            source.display_image.width,
-                            source.display_image.height,
+                            source.display_size.0,
+                            source.display_size.1,
                             source.frame_count()
                         ));
                         setting_row(ui, "帧", |ui| {
@@ -73,7 +73,7 @@ pub fn show(
                     } else {
                         ui.label(format!(
                             "{} × {} px",
-                            source.display_image.width, source.display_image.height
+                            source.display_size.0, source.display_size.1
                         ));
                     }
 

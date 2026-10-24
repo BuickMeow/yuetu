@@ -40,18 +40,15 @@ pub fn show(
                 ui,
                 view,
                 source.texture.id(),
-                (source.display_image.width, source.display_image.height),
+                source.display_size,
                 source.has_transparency,
                 checker_texture,
                 coordinate_origin,
             );
             *hover = hovered.map(|pixel| StageHover::Source {
                 pos: (pixel.x, pixel.y),
-                color: source
-                    .display_image
-                    .pixel(pixel.x, pixel.y)
-                    .unwrap_or(Color::TRANSPARENT),
-                height: source.display_image.height,
+                color: source.display_pixel(pixel.x, pixel.y),
+                height: source.display_size.1,
             });
         }
         PipelineStage::KeyMap | PipelineStage::Palette | PipelineStage::Midi => {
