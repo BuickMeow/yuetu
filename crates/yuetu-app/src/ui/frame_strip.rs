@@ -6,11 +6,43 @@
 
 use egui::scroll_area::ScrollBarVisibility;
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui};
+use egui_extras::{Size, StripBuilder};
+use egui_material_icons::MaterialIcon;
+use egui_material_icons::icons::{ICON_VIEW_MODULE, ICON_VIEW_TIMELINE};
 
 use crate::state::SourceImage;
 use crate::theme;
 
-const THUMBNAIL_LIMIT: usize = 120;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrameStripMode {
+    #[default]
+    Thumbnails,
+    Timeline,
+}
+
+impl FrameStripMode {
+    fn toggled(self) -> Self {
+        match self {
+            Self::Thumbnails => Self::Timeline,
+            Self::Timeline => Self::Thumbnails,
+        }
+    }
+
+    fn target_label(self) -> &'static str {
+        match self {
+            Self::Thumbnails => "切换到时间轴",
+            Self::Timeline => "切换到缩略图",
+        }
+    }
+
+    fn target_icon(self) -> MaterialIcon {
+        match self {
+            Self::Thumbnails => ICON_VIEW_TIMELINE,
+            Self::Timeline => ICON_VIEW_MODULE,
+        }
+    }
+}
+
 const THUMBNAIL_CELL_WIDTH: f32 = 64.0;
 const THUMBNAIL_CELL_HEIGHT: f32 = 56.0;
 const THUMBNAIL_CELL_GAP: f32 = 4.0;
@@ -19,9 +51,15 @@ const THUMBNAIL_STRIDE: f32 = THUMBNAIL_CELL_WIDTH + THUMBNAIL_CELL_GAP;
 const TIMELINE_FRAME_WIDTH: f32 = 10.0;
 const TIMELINE_HEIGHT: f32 = 56.0;
 const TIMELINE_RULER_HEIGHT: f32 = 18.0;
+const MODE_BUTTON_SIZE: f32 = 28.0;
 
 /// Returns the frame clicked or dragged to in this frame.
-pub fn show(ui: &mut Ui, source: &mut SourceImage, last_selected: &mut usize) -> Option<usize> {
+pub fn show(
+    ui: &mut Ui,
+    source: &mut SourceImage,
+    last_selected: &mut usize,
+    mode: &mut FrameStripMode,
+) -> Option<usize> {
     let frame_count = source.frame_count();
     if frame_count <= 1 {
         return None;
@@ -31,11 +69,34 @@ pub fn show(ui: &mut Ui, source: &mut SourceImage, last_selected: &mut usize) ->
     let scroll_to_selected = selected != *last_selected;
     *last_selected = selected;
 
-    let chosen = if frame_count > THUMBNAIL_LIMIT {
-        show_timeline(ui, frame_count, selected, scroll_to_selected)
-    } else {
-        show_thumbnails(ui, source, selected, scroll_to_selected)
-    };
+    let current_mode = *mode;
+    let mut chosen = None;
+    StripBuilder::new(ui)
+        .size(Size::remainder())
+        .size(Size::exact(MODE_BUTTON_SIZE))
+        .horizontal(|mut strip| {
+            strip.cell(|ui| {
+                chosen = match current_mode {
+                    FrameStripMode::Thumbnails => {
+                        show_thumbnails(ui, source, selected, scroll_to_selected)
+                    }
+                    FrameStripMode::Timeline => {
+                        show_timeline(ui, frame_count, selected, scroll_to_selected)
+                    }
+                };
+            });
+            strip.cell(|ui| {
+                let clicked = ui
+                    .centered_and_justified(|ui| mode_button(ui, current_mode))
+                    .inner;
+                if clicked {
+                    *mode = current_mode.toggled();
+                    // The two ScrollAreas keep independent offsets. Force the
+                    // new mode to reveal the current frame on its first frame.
+                    *last_selected = usize::MAX;
+                }
+            });
+        });
 
     if let Some(index) = chosen {
         *last_selected = index;
@@ -123,7 +184,7 @@ fn show_thumbnails(
                     cell.left_bottom() + egui::vec2(5.0, -3.0),
                     Align2::LEFT_BOTTOM,
                     format!("{}", index + 1),
-                    FontId::monospace(9.0),
+                    FontId::proportional(9.0),
                     number_color,
                 );
 
@@ -210,7 +271,7 @@ fn show_timeline(
                         egui::pos2(x + 3.0, ruler.top() + 2.0),
                         Align2::LEFT_TOP,
                         format!("{}", index + 1),
-                        FontId::monospace(9.0),
+                        FontId::proportional(9.0),
                         label_color,
                     );
                 }
@@ -275,6 +336,28 @@ fn timeline_label_step(frame_width: f32) -> usize {
         }
     }
     target.max(1)
+}
+
+fn mode_button(ui: &mut Ui, mode: FrameStripMode) -> bool {
+    let icon = mode.target_icon();
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(MODE_BUTTON_SIZE, MODE_BUTTON_SIZE),
+        Sense::click(),
+    );
+    let background = if response.hovered() {
+        ui.visuals().widgets.hovered.weak_bg_fill
+    } else {
+        ui.visuals().widgets.inactive.weak_bg_fill
+    };
+    ui.painter().rect_filled(rect, 6.0, background);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icon.codepoint,
+        FontId::new(18.0, icon.font_family()),
+        ui.visuals().text_color(),
+    );
+    response.on_hover_text(mode.target_label()).clicked()
 }
 
 fn scroll_bar_visibility(ui: &Ui, content_width: f32) -> ScrollBarVisibility {

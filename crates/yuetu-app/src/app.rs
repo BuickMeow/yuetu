@@ -31,6 +31,7 @@ pub struct YuetuApp {
     stage_hover: Option<StageHover>,
     coordinate_origin: CoordinateOrigin,
     frame_strip_last_frame: usize,
+    frame_strip_mode: ui::frame_strip::FrameStripMode,
     checker_texture: egui::TextureHandle,
     gpu_target_format: eframe::wgpu::TextureFormat,
     source_view: View2D,
@@ -73,6 +74,7 @@ impl YuetuApp {
             stage_hover: None,
             coordinate_origin: CoordinateOrigin::TopLeft,
             frame_strip_last_frame: 0,
+            frame_strip_mode: ui::frame_strip::FrameStripMode::default(),
             checker_texture,
             gpu_target_format,
             source_view: View2D::default(),
@@ -540,11 +542,13 @@ impl eframe::App for YuetuApp {
                 if let Some(source) = self.source.as_mut() {
                     if source.frame_count() > 1 {
                         let last_frame = &mut self.frame_strip_last_frame;
+                        let mode = &mut self.frame_strip_mode;
                         egui::Panel::bottom("frame_strip")
                             .show_separator_line(false)
                             .frame(theme::panel_frame(ui, theme::PanelKind::FrameStrip))
                             .show(ui, |ui| {
-                                frame_strip_action = ui::frame_strip::show(ui, source, last_frame);
+                                frame_strip_action =
+                                    ui::frame_strip::show(ui, source, last_frame, mode);
                             });
                     }
                 }

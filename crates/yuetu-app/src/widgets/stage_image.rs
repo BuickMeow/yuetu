@@ -154,7 +154,7 @@ fn draw_rulers(
     let step = ruler_step(interaction.scale);
     let tick_color = theme::muted(ui).gamma_multiply(0.75);
     let label_color = theme::faint(ui);
-    let font = FontId::monospace(9.0);
+    let font = FontId::proportional(9.0);
 
     let content = interaction.content_rect;
     let first_x =

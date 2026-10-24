@@ -91,7 +91,7 @@ pub fn show(
                     egui::pos2(x + 2.0, interaction.viewport.top() + 3.0),
                     egui::Align2::LEFT_TOP,
                     note_name(key),
-                    FontId::monospace(9.0),
+                    FontId::proportional(9.0),
                     theme::faint(ui),
                 );
             }
