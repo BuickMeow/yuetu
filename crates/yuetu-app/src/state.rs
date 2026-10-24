@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use yuetu_core::resize::resize;
 use yuetu_core::{
-    Color, ConversionConfig, ConversionResult, IndexedImage, Palette, ResizeAlgorithm, RgbaImage,
-    load_image_sequence,
+    Color, ConversionConfig, ConversionResult, ImageSequence, IndexedImage, Palette,
+    ResizeAlgorithm, RgbaImage, load_image_sequence, normalize_degrees, rotate_image,
 };
 
 use crate::widgets::midi_gpu::MidiGpuData;
@@ -18,22 +18,28 @@ const MAX_TEXTURE_SIDE: u32 = 4096;
 pub struct SourceImage {
     pub path: PathBuf,
     pub name: String,
-    /// The currently selected frame, shared with the conversion job.
+    /// The currently selected frame, before rotation. Conversion applies
+    /// `rotation_deg` in the worker so changing the angle never blocks the UI.
     pub image: Arc<RgbaImage>,
+    /// Rotated selected frame used by the source stage and its rulers.
+    pub display_image: Arc<RgbaImage>,
     pub has_transparency: bool,
     frames: Vec<Arc<RgbaImage>>,
+    delays_ms: Vec<u32>,
     frame_index: usize,
+    rotation_deg: f32,
     pub texture: TextureHandle,
 }
 
 impl SourceImage {
     pub fn load(ctx: &egui::Context, path: PathBuf) -> yuetu_core::Result<Self> {
-        let sequence = load_image_sequence(&path)?;
-        let frames: Vec<Arc<RgbaImage>> = sequence.frames.into_iter().map(Arc::new).collect();
+        let ImageSequence { frames, delays_ms } = load_image_sequence(&path)?;
+        let frames: Vec<Arc<RgbaImage>> = frames.into_iter().map(Arc::new).collect();
         let image = frames[0].clone();
-        let has_transparency = image_has_transparency(&image);
+        let display_image = image.clone();
+        let has_transparency = image_has_transparency(&display_image);
         let texture_name = format!("source:{}:0", path.display());
-        let texture = upload_texture(ctx, &texture_name, &image)?;
+        let texture = upload_texture(ctx, &texture_name, &display_image)?;
 
         let name = path
             .file_name()
@@ -45,9 +51,12 @@ impl SourceImage {
             path,
             name,
             image,
+            display_image,
             has_transparency,
             frames,
+            delays_ms,
             frame_index: 0,
+            rotation_deg: 0.0,
             texture,
         })
     }
@@ -60,6 +69,18 @@ impl SourceImage {
         self.frame_index
     }
 
+    pub fn delays_ms(&self) -> &[u32] {
+        &self.delays_ms
+    }
+
+    pub fn palette_frames(&self) -> &[Arc<RgbaImage>] {
+        &self.frames
+    }
+
+    pub fn rotation_deg(&self) -> f32 {
+        self.rotation_deg
+    }
+
     pub fn select_frame(&mut self, ctx: &egui::Context, index: usize) -> yuetu_core::Result<bool> {
         if self.frames.len() <= 1 {
             return Ok(false);
@@ -70,14 +91,53 @@ impl SourceImage {
         }
 
         let image = self.frames[index].clone();
-        let has_transparency = image_has_transparency(&image);
-        let texture_name = format!("source:{}:{index}", self.path.display());
-        let texture = upload_texture(ctx, &texture_name, &image)?;
+        let display_image = rotate_for_display(&image, self.rotation_deg)?;
+        let has_transparency = image_has_transparency(&display_image);
+        let texture_name = self.texture_name(index);
+        let texture = upload_texture(ctx, &texture_name, &display_image)?;
         self.image = image;
+        self.display_image = display_image;
         self.has_transparency = has_transparency;
         self.frame_index = index;
         self.texture = texture;
         Ok(true)
+    }
+
+    /// Change the source rotation. Only the selected frame is rotated here for
+    /// the source stage; conversion rotates the selected frame in its worker
+    /// and builds the shared palette from the unrotated sequence.
+    pub fn set_rotation(&mut self, ctx: &egui::Context, degrees: f32) -> yuetu_core::Result<bool> {
+        let degrees = normalize_degrees(degrees);
+        if (degrees - self.rotation_deg).abs() < 1e-4 {
+            return Ok(false);
+        }
+
+        let display_image = rotate_for_display(&self.image, degrees)?;
+        let has_transparency = image_has_transparency(&display_image);
+        let texture_name = self.texture_name(self.frame_index);
+        let texture = upload_texture(ctx, &texture_name, &display_image)?;
+        self.display_image = display_image;
+        self.has_transparency = has_transparency;
+        self.rotation_deg = degrees;
+        self.texture = texture;
+        Ok(true)
+    }
+
+    fn texture_name(&self, frame_index: usize) -> String {
+        format!(
+            "source:{}:{}:{:.3}",
+            self.path.display(),
+            frame_index,
+            self.rotation_deg
+        )
+    }
+}
+
+fn rotate_for_display(image: &RgbaImage, degrees: f32) -> yuetu_core::Result<Arc<RgbaImage>> {
+    if normalize_degrees(degrees) == 0.0 {
+        Ok(Arc::new(image.clone()))
+    } else {
+        rotate_image(image, degrees).map(Arc::new)
     }
 }
 
@@ -173,6 +233,30 @@ impl ZoomPreset {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CoordinateOrigin {
+    #[default]
+    TopLeft,
+    BottomLeft,
+}
+
+impl CoordinateOrigin {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "左上角",
+            Self::BottomLeft => "左下角",
+        }
+    }
+
+    /// Convert a top-left pixel row into the displayed row for this origin.
+    pub fn display_y(self, y: u32, height: u32) -> u32 {
+        match self {
+            Self::TopLeft => y,
+            Self::BottomLeft => height.saturating_sub(1).saturating_sub(y),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct StageStop {
     pub stage: PipelineStage,
@@ -184,11 +268,13 @@ pub enum StageHover {
     Source {
         pos: (u32, u32),
         color: Color,
+        height: u32,
     },
     KeyMap {
         pos: (u32, u32),
         color: Color,
         key: Option<u8>,
+        height: u32,
     },
     Palette {
         index: i32,
@@ -312,5 +398,19 @@ impl StatusMessage {
 impl Default for StatusMessage {
     fn default() -> Self {
         Self::info("就绪")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CoordinateOrigin;
+
+    #[test]
+    fn bottom_left_origin_flips_the_displayed_row() {
+        assert_eq!(CoordinateOrigin::TopLeft.display_y(0, 100), 0);
+        assert_eq!(CoordinateOrigin::TopLeft.display_y(99, 100), 99);
+        assert_eq!(CoordinateOrigin::BottomLeft.display_y(0, 100), 99);
+        assert_eq!(CoordinateOrigin::BottomLeft.display_y(99, 100), 0);
+        assert_eq!(CoordinateOrigin::BottomLeft.display_y(0, 0), 0);
     }
 }

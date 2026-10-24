@@ -28,9 +28,13 @@ pub mod palette;
 pub mod progress;
 pub mod quantize;
 pub mod resize;
+pub mod rotate;
 
 pub use color::Color;
-pub use convert::{ConversionConfig, ConversionResult, convert, convert_with_progress};
+pub use convert::{
+    ConversionConfig, ConversionResult, PaletteScope, convert, convert_frames_with_progress,
+    convert_with_progress,
+};
 pub use error::{Error, Result};
 pub use image::{
     ImageSequence, RgbaImage, load_image, load_image_from_memory, load_image_sequence,
@@ -42,3 +46,4 @@ pub use palette::Palette;
 pub use progress::{Progress, Stage};
 pub use quantize::{IndexedImage, TRANSPARENT_ID, quantize, quantize_with_progress};
 pub use resize::ResizeAlgorithm;
+pub use rotate::{normalize_degrees, rotate_image};

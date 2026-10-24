@@ -2,12 +2,13 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use egui::{Key, Modifiers};
-use yuetu_core::{ConversionConfig, Stage};
+use yuetu_core::{ConversionConfig, PaletteScope, Stage};
 
 use crate::jobs::{JobEvent, JobRunner, ProgressView};
 use crate::settings::Settings;
 use crate::state::{
-    PipelineStage, Preview, SourceImage, StageHover, StageStop, StatusMessage, ZoomPreset,
+    CoordinateOrigin, PipelineStage, Preview, SourceImage, StageHover, StageStop, StatusMessage,
+    ZoomPreset,
 };
 use crate::theme;
 use crate::ui;
@@ -28,6 +29,7 @@ pub struct YuetuApp {
     stage: PipelineStage,
     stage_stops: Vec<StageStop>,
     stage_hover: Option<StageHover>,
+    coordinate_origin: CoordinateOrigin,
     checker_texture: egui::TextureHandle,
     gpu_target_format: eframe::wgpu::TextureFormat,
     source_view: View2D,
@@ -68,6 +70,7 @@ impl YuetuApp {
             stage: PipelineStage::Source,
             stage_stops: Vec::new(),
             stage_hover: None,
+            coordinate_origin: CoordinateOrigin::TopLeft,
             checker_texture,
             gpu_target_format,
             source_view: View2D::default(),
@@ -114,9 +117,10 @@ impl YuetuApp {
 
         match SourceImage::load(ctx, path.clone()) {
             Ok(source) => {
+                self.settings.rotation_deg = 0.0;
                 self.status = StatusMessage::success(format!(
                     "已加载 {} · {} × {} px",
-                    source.name, source.image.width, source.image.height
+                    source.name, source.display_image.width, source.display_image.height
                 ));
                 self.source = Some(source);
                 self.source_revision = self.source_revision.wrapping_add(1);
@@ -150,7 +154,22 @@ impl YuetuApp {
         }
 
         let config = self.settings.conversion_config();
-        match self.jobs.start(source.image.clone(), config.clone()) {
+        let palette_frames = if config.palette_scope == PaletteScope::AllFrames {
+            source.palette_frames().to_vec()
+        } else {
+            Vec::new()
+        };
+        let delays_ms = if config.palette_scope == PaletteScope::AllFrames {
+            source.delays_ms().to_vec()
+        } else {
+            Vec::new()
+        };
+        match self.jobs.start(
+            source.image.clone(),
+            palette_frames,
+            delays_ms,
+            config.clone(),
+        ) {
             Ok(_) => {
                 self.job_config = Some(config);
                 self.job_source_revision = Some(self.source_revision);
@@ -436,6 +455,7 @@ impl eframe::App for YuetuApp {
                     &self.status,
                     self.stage,
                     self.stage_hover,
+                    self.coordinate_origin,
                     self.current_zoom_percent(),
                     self.zoom_modes[self.stage.index()],
                     zoom_enabled,
@@ -460,6 +480,7 @@ impl eframe::App for YuetuApp {
                 ui::controls::show(
                     ui,
                     &mut self.settings,
+                    &mut self.coordinate_origin,
                     self.source.as_ref(),
                     self.preview.as_ref(),
                     self.jobs.is_running(),
@@ -501,6 +522,7 @@ impl eframe::App for YuetuApp {
                 stage_action = ui::stage_panel::show(
                     ui,
                     stage,
+                    self.coordinate_origin,
                     source,
                     preview,
                     view,
@@ -551,6 +573,45 @@ impl eframe::App for YuetuApp {
                     }
                 }
             }
+        }
+        if let Some(degrees) = controls_action.rotation {
+            if let Some(source) = self.source.as_mut() {
+                match source.set_rotation(&ctx, degrees) {
+                    Ok(true) => {
+                        self.settings.rotation_deg = source.rotation_deg();
+                        self.source_revision = self.source_revision.wrapping_add(1);
+                        self.stage_hover = None;
+                        self.source_view.reset_fit();
+                        self.status = StatusMessage::info("正在更新预览…");
+                        self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+                        acted = true;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.settings.rotation_deg = source.rotation_deg();
+                        self.status = StatusMessage::error(format!("旋转失败：{error}"));
+                    }
+                }
+            }
+        }
+        if controls_action.reset {
+            self.settings = Settings::default();
+            self.coordinate_origin = CoordinateOrigin::TopLeft;
+            if let Some(source) = self.source.as_mut() {
+                match source.set_rotation(&ctx, 0.0) {
+                    Ok(true) => {
+                        self.source_revision = self.source_revision.wrapping_add(1);
+                        self.source_view.reset_fit();
+                        self.stage_hover = None;
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.status = StatusMessage::error(format!("重置旋转失败：{error}"));
+                    }
+                }
+            }
+            self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+            acted = true;
         }
         if controls_action.export {
             self.export_dialog();

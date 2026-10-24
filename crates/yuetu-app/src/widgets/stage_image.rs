@@ -2,6 +2,7 @@
 
 use egui::{Color32, CursorIcon, FontId, Rect, Stroke, StrokeKind, Ui};
 
+use crate::state::CoordinateOrigin;
 use crate::theme;
 use crate::widgets::view2d::View2D;
 
@@ -19,6 +20,7 @@ pub fn show(
     content_size: (u32, u32),
     checkerboard: bool,
     checker_texture: egui::TextureId,
+    coordinate_origin: CoordinateOrigin,
 ) -> Option<RasterHover> {
     let size = egui::vec2(content_size.0.max(1) as f32, content_size.1.max(1) as f32);
     let interaction = view.interact(ui, size, CursorIcon::Crosshair);
@@ -62,7 +64,7 @@ pub fn show(
         }
     }
 
-    draw_rulers(ui, &painter, &interaction, content_size);
+    draw_rulers(ui, &painter, &interaction, content_size, coordinate_origin);
     hovered
 }
 
@@ -101,6 +103,7 @@ fn draw_rulers(
     painter: &egui::Painter,
     interaction: &crate::widgets::view2d::ViewInteraction,
     content_size: (u32, u32),
+    coordinate_origin: CoordinateOrigin,
 ) {
     if interaction.scale <= 1e-6 {
         return;
@@ -113,29 +116,37 @@ fn draw_rulers(
         return;
     }
 
-    let top_band = Rect::from_min_max(
+    let corner = Rect::from_min_max(
         viewport.min,
+        egui::pos2(viewport.left() + LEFT, viewport.top() + TOP),
+    );
+    let top_band = Rect::from_min_max(
+        egui::pos2(corner.right(), viewport.top()),
         egui::pos2(viewport.right(), viewport.top() + TOP),
     );
     let left_band = Rect::from_min_max(
-        egui::pos2(viewport.left(), viewport.top() + TOP),
+        egui::pos2(viewport.left(), corner.bottom()),
         egui::pos2(viewport.left() + LEFT, viewport.bottom()),
     );
-    painter.rect_filled(top_band, 0.0, ui.visuals().panel_fill);
-    painter.rect_filled(left_band, 0.0, ui.visuals().panel_fill);
+    let ruler_fill = ui.visuals().panel_fill;
+    painter.rect_filled(corner, 0.0, ruler_fill);
+    painter.rect_filled(top_band, 0.0, ruler_fill);
+    painter.rect_filled(left_band, 0.0, ruler_fill);
 
     let edge = theme::faint(ui).gamma_multiply(0.45);
+    // The corner is a real cell, not an accidental intersection: close its
+    // right and bottom edges, then continue the same lines along the rulers.
     painter.line_segment(
         [
-            egui::pos2(viewport.left(), viewport.top() + TOP),
-            egui::pos2(viewport.right(), viewport.top() + TOP),
+            egui::pos2(corner.left(), corner.bottom()),
+            egui::pos2(viewport.right(), corner.bottom()),
         ],
         Stroke::new(1.0, edge),
     );
     painter.line_segment(
         [
-            egui::pos2(viewport.left() + LEFT, viewport.top() + TOP),
-            egui::pos2(viewport.left() + LEFT, viewport.bottom()),
+            egui::pos2(corner.right(), corner.top()),
+            egui::pos2(corner.right(), viewport.bottom()),
         ],
         Stroke::new(1.0, edge),
     );
@@ -190,15 +201,15 @@ fn draw_rulers(
                 ],
                 Stroke::new(1.0, tick_color),
             );
-            if sy + 12.0 <= viewport.bottom() {
-                painter.text(
-                    egui::pos2(viewport.left() + LEFT - 4.0, sy + 1.0),
-                    egui::Align2::RIGHT_TOP,
-                    y.to_string(),
-                    font.clone(),
-                    label_color,
-                );
-            }
+            let label_top = (sy + 1.0).min(viewport.bottom() - 11.0);
+            let label_y = coordinate_origin.display_y(y, content_size.1);
+            painter.text(
+                egui::pos2(viewport.left() + LEFT - 4.0, label_top),
+                egui::Align2::RIGHT_TOP,
+                label_y.to_string(),
+                font.clone(),
+                label_color,
+            );
         }
         y = y.saturating_add(step);
     }

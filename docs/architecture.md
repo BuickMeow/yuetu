@@ -50,7 +50,7 @@ ImageSequence {
 }
 ```
 
-图片解码只负责得到像素。旋转、翻转、灰度、GIF/WebP 拆帧和选帧都属于“前处理”，但不应塞进 `convert()`。动画帧在 UI 线程一次性解码并设置内存上限；`convert()` 只接收当前选中的那一帧。
+图片解码只负责得到像素。GIF/WebP 拆帧和选帧属于前处理；动画帧在 UI 线程一次性解码并设置内存上限。`convert_frames_with_progress()` 接收当前选中的那一帧，以及完整帧序列/帧延迟用于共享调色板。旋转是 `ConversionConfig.rotation_deg`，在 worker 里先于缩放执行；源图阶段只为当前帧生成一张旋转后的显示纹理，不阻塞 UI。
 
 ### 3.2 中间表示
 
@@ -65,6 +65,8 @@ IndexedImage { width, height, indices: Vec<i32> } // -2 = 静音
 - 用了什么缩放算法；
 - 调色板是自动聚类还是手动选的；
 - 输出 MIDI 的 PPQ / BPM。
+
+自动调色板先统计加权 RGB 直方图：动画的每一帧按帧延迟加权，透明像素跳过；然后用加权 K-Means++ 初始化 + 加权 K-Means 聚类。这样所有帧共用一组颜色和音轨索引，避免切帧时同一颜色跳到另一条轨。颜色距离使用 RGB 平方距离，与后续 `nearest_index()` 的量化距离保持一致。
 
 ### 3.3 输出
 
@@ -97,7 +99,8 @@ ConversionResult {
 ```text
 validate config
   → KeyMap::build
-  → Palette::from_image（或手动调色板）
+  → rotate(rotation_deg)
+  → Palette::from_frames（所有帧加权；或当前帧 / 手动调色板）
   → resize(width = keymap.width, height = aspect)
   → quantize
   → generate_notes
@@ -123,12 +126,13 @@ validate config
 `YuetuApp` 只持有一棵状态树：
 
 ```text
-source: Option<SourceImage>   // 全部帧 + 当前帧 CPU 图 + GPU 显示纹理
-source_revision: u64          // 图片或 GIF 帧变化时递增
+source: Option<SourceImage>   // 全部帧 + 当前帧 CPU 图 + 旋转显示图 + GPU 纹理
+source_revision: u64          // 图片、GIF 帧或旋转角度变化时递增
 preview: Option<Preview>      // ConversionResult + 配置 + 阶段纹理
-settings: Settings            // UI 参数
+settings: Settings            // UI 参数（含旋转、色板范围）
 stage: PipelineStage          // 当前流水线阶段
-stage_stops                   // 左侧卡片中心，供图标滑块吸附
+stage_stops: Vec<StageStop>   // 左侧卡片中心，供图标滑块吸附
+coordinate_origin             // 标尺/悬停坐标原点：左上角或左下角
 source/key/palette/midi_view  // 每个阶段独立的 View2D
 status / hover                // 一帧内的展示信息
 ```
@@ -144,7 +148,7 @@ fn show(ui, 状态引用, 可变 UI 状态) -> Action
 面板不直接改 `YuetuApp` 的全局状态，只返回动作或绘制信息：
 
 ```text
-controls::Action   { open, cancel, export, frame }
+controls::Action   { open, cancel, export, frame, rotation }
 stage_panel::Action { open }
 status_bar::Action  { set_zoom_percent, fit_width }
 ```
@@ -162,10 +166,10 @@ status_bar::Action  { set_zoom_percent, fit_width }
 耗时转换不占用 UI 线程：
 
 ```text
-UI: JobRunner::start(image Arc + config)
+UI: JobRunner::start(image Arc + palette frames + delays + config)
         │
         ▼
-worker thread: convert_with_progress(..., cancel, progress)
+worker thread: convert_frames_with_progress(..., cancel, progress)
         │  JobEvent::Progress / Finished / Failed / Cancelled
         ▼
 UI: poll_jobs() → 状态栏 + 进度条 + 新 Preview
@@ -205,10 +209,12 @@ MIDI 阶段的坐标单位是“列 × pixel-tick”，不是屏幕像素；因�
 
 四个阶段由左侧卡片定义：
 
-1. `源图`：原始图像 + Photoshop 风格像素标尺；
+1. `源图`：原始图像 + Photoshop 风格像素标尺；可设旋转角度（正值顺时针），标尺原点可切到左下角；
 2. `键位映射`：按 `KeyMap::width()` 缩放后的图片，保持宽高比；
-3. `调色板`：`IndexedImage` 按调色板还原成索引色图，悬停显示索引和色号；
+3. `调色板`：`IndexedImage` 按调色板还原成索引色图，悬停显示索引和色号；色板范围可选“所有帧”或“当前帧”；
 4. `MIDI 输出`：钢琴卷帘音符；音符长度/切分设置也归入这一阶段。
+
+标尺左上角是明确的 corner cell（横/纵标尺交汇格），不是漏画；它的右边和下边与标尺分隔线相连。坐标原点为左下角时，纵轴标签按 `height - 1 - row` 显示，底部像素行为 0，顶部为 `height - 1`；状态栏悬停坐标同步使用同一转换。
 
 最左侧保留 32px 轨道：灰色长圆角矩形宽 24px、圆角 12px，与高亮圆的直径/半径完全一致；轨道两端额外延长一个半径，使端帽中心与首尾阶段中心重合，当前阶段的圆形 thumb 能完整覆盖端帽。每个阶段中心放一个 Material Icon，当前阶段用同一个 24px 圆形 thumb 包裹图标。轨道颜色向面板背景混合，保持低对比。拖拽时按指针 y 找最近卡片中心并吸附，不会停在卡片之间。
 
@@ -247,6 +253,9 @@ eframe::Renderer::Wgpu
 - [x] 转换移到后台线程：`JobRunner` + `JobEvent` + 分阶段进度 + 协作式取消；
 - [x] 参数变化自动重新生成预览（80 ms debounce，无手动生成按钮）；
 - [x] GIF / 动态 WebP 逐帧选择，切帧自动更新预览；
+- [x] 多帧共享调色板：按帧延迟加权直方图 + 加权 K-Means++；
+- [x] 原图旋转（任意角度，源图阶段实时显示，转换在 worker 中执行）；
+- [x] 标尺/悬停坐标原点切换（左上角 / 左下角）；
 - [x] 左侧 Material Icons 流水线 + 四阶段中央视图（源图/键位/索引色/MIDI）；
 - [ ] 颜色拾取：点原图取色，编辑/替换调色板；
 - [ ] 手动调色板 + 自动调色板切换；
@@ -254,10 +263,10 @@ eframe::Renderer::Wgpu
 
 ### M3：功能对齐 ImageToMidi_Modded
 
-- 调色板算法：K-Means++、Octree、Median Cut、GMM、DBSCAN、Floyd/Ordered dithering；
+- 调色板算法：Octree、Median Cut、GMM、DBSCAN、Floyd/Ordered dithering；
 - 缩放算法：Bilinear、Bicubic、Lanczos、Area、Nearest、Mode pooling；
 - 高度模式、黑/白键六种组合、最大音符长度模式；
-- 视频导入与选帧（ffmpeg / 原生解码后端）；
+- 视频导入与选帧（ffmpeg / 原生解码后端）；解码后的帧和时长直接复用 `Palette::from_frames_cancellable()` 与 `convert_frames_with_progress()`；
 - SVG/PSD/TIFF 等格式；
 - 批量导出；
 - 中英文界面。

@@ -1,14 +1,14 @@
 //! Palette generation and nearest-color lookup.
 //!
-//! M1 deliberately ships one simple, deterministic palette source: a
-//! frequency-ranked popularity palette over 5-bit RGB bins. It is not the
-//! final clustering story, but it gives real colors and real tracks to the
-//! preview without coupling the UI to a clustering experiment.
+//! The palette is built from a weighted RGB histogram followed by weighted
+//! k-means clustering. For animations every frame contributes to the same
+//! histogram, weighted by its display duration, so a single palette can be
+//! shared by all frames. A static image is simply a one-frame sequence.
 //!
-//! Later palette sources (K-Means, octree, dithering, …) can implement the
-//! same `Vec<Color>` output and be dropped in without touching note generation.
+//! The palette is intentionally a `Vec<Color>`: later sources (octree, median
+//! cut, perceptual clustering) can implement the same output without touching
+//! note generation.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::color::Color;
@@ -35,71 +35,127 @@ impl Palette {
         self.colors.is_empty()
     }
 
-    /// Build a popularity palette from the *source* image.
-    ///
-    /// Colors are grouped into 5-bit-per-channel bins so near-identical
-    /// anti-aliased pixels do not each become their own track. The returned
-    /// colors are the average of each bin, ordered by pixel count.
+    /// Build a palette from one image.
     pub fn from_image(image: &RgbaImage, max_colors: usize) -> Self {
         Self::from_image_cancellable(image, max_colors, None, None).unwrap_or_default()
     }
 
     /// Cancellable variant used by the worker thread.
-    ///
-    /// Cancellation and progress are checked every 65 536 pixels, which keeps
-    /// the scan responsive without adding an atomic load per pixel.
     pub fn from_image_cancellable(
         image: &RgbaImage,
         max_colors: usize,
         cancel: Option<&AtomicBool>,
         progress: Option<&dyn Progress>,
     ) -> Result<Self> {
+        Self::from_frames_cancellable(std::iter::once(image), &[0], max_colors, cancel, progress)
+    }
+
+    /// Build one palette shared by a sequence of frames.
+    ///
+    /// Each frame's pixels are weighted by its delay, so colors that stay on
+    /// screen longer matter more. Frames with a zero delay (still images or
+    /// malformed GIFs) get weight 1. All colors are clustered together, which
+    /// is what makes the same track indices meaningful across frames.
+    pub fn from_frames_cancellable<'a>(
+        frames: impl IntoIterator<Item = &'a RgbaImage>,
+        delays_ms: &[u32],
+        max_colors: usize,
+        cancel: Option<&AtomicBool>,
+        progress: Option<&dyn Progress>,
+    ) -> Result<Self> {
+        let frames: Vec<&RgbaImage> = frames.into_iter().collect();
         let max_colors = max_colors.max(1);
-        let mut bins: HashMap<u32, Bin> = HashMap::new();
-        let pixel_count = image.pixels.len() / 4;
-
-        report(progress, Stage::Palette, 0.0);
-        for (index, px) in image.pixels.chunks_exact(4).enumerate() {
-            if index % 65_536 == 0 {
-                if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                    return Err(Error::Cancelled);
-                }
-                if pixel_count > 0 {
-                    report(progress, Stage::Palette, index as f32 / pixel_count as f32);
-                }
-            }
-
-            let color = Color::rgba(px[0], px[1], px[2], px[3]);
-            if !color.is_visible() {
-                continue;
-            }
-            let key = (u32::from(color.r >> 3) << 10)
-                | (u32::from(color.g >> 3) << 5)
-                | u32::from(color.b >> 3);
-            let bin = bins.entry(key).or_default();
-            bin.count += 1;
-            bin.r += u64::from(color.r);
-            bin.g += u64::from(color.g);
-            bin.b += u64::from(color.b);
+        if frames.is_empty() {
+            report(progress, Stage::Palette, 1.0);
+            return Ok(Self::default());
         }
 
-        let mut entries: Vec<(u32, Bin)> = bins.into_iter().collect();
-        entries
-            .sort_by(|(key_a, a), (key_b, b)| b.count.cmp(&a.count).then_with(|| key_a.cmp(key_b)));
+        let total_pixels: u64 = frames
+            .iter()
+            .map(|frame| frame.pixels.len() as u64 / 4)
+            .sum();
+        let mut bins = vec![Bin::default(); BIN_COUNT];
+        let mut processed = 0u64;
 
-        let colors = entries
+        report(progress, Stage::Palette, 0.0);
+        for (frame_index, frame) in frames.iter().enumerate() {
+            if is_cancelled(cancel) {
+                return Err(Error::Cancelled);
+            }
+            let frame_weight = u64::from(delays_ms.get(frame_index).copied().unwrap_or(0).max(1));
+
+            for px in frame.pixels.chunks_exact(4) {
+                if processed % 65_536 == 0 {
+                    if is_cancelled(cancel) {
+                        return Err(Error::Cancelled);
+                    }
+                    if total_pixels > 0 {
+                        report(
+                            progress,
+                            Stage::Palette,
+                            processed as f32 / total_pixels as f32,
+                        );
+                    }
+                }
+
+                let alpha = px[3];
+                if alpha < 128 {
+                    processed += 1;
+                    continue;
+                }
+                let r = u16::from(px[0]);
+                let g = u16::from(px[1]);
+                let b = u16::from(px[2]);
+                let key = (u32::from(px[0] >> 3) << 10)
+                    | (u32::from(px[1] >> 3) << 5)
+                    | u32::from(px[2] >> 3);
+                let bin = &mut bins[key as usize];
+                bin.weight += frame_weight;
+                bin.r += u64::from(r) * frame_weight;
+                bin.g += u64::from(g) * frame_weight;
+                bin.b += u64::from(b) * frame_weight;
+                processed += 1;
+            }
+        }
+
+        let mut entries: Vec<WeightedColor> = bins
             .into_iter()
-            .take(max_colors)
-            .map(|(_, bin)| {
-                let count = bin.count.max(1);
-                Color::rgb(
-                    (bin.r / count) as u8,
-                    (bin.g / count) as u8,
-                    (bin.b / count) as u8,
-                )
+            .enumerate()
+            .filter(|(_, bin)| bin.weight > 0)
+            .map(|(key, bin)| {
+                let weight = bin.weight as f64;
+                WeightedColor {
+                    key: key as u32,
+                    weight,
+                    rgb: [
+                        bin.r as f64 / weight,
+                        bin.g as f64 / weight,
+                        bin.b as f64 / weight,
+                    ],
+                }
             })
             .collect();
 
+        // Stable order: most common bins first, with the bin key as a
+        // deterministic tie-breaker.
+        entries.sort_by(|a, b| {
+            b.weight
+                .total_cmp(&a.weight)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+
+        if entries.is_empty() {
+            report(progress, Stage::Palette, 1.0);
+            return Ok(Self::default());
+        }
+
+        if entries.len() <= max_colors {
+            let colors = entries.iter().map(|entry| entry.to_color()).collect();
+            report(progress, Stage::Palette, 1.0);
+            return Ok(Self { colors });
+        }
+
+        let colors = weighted_kmeans(&entries, max_colors, cancel)?;
         report(progress, Stage::Palette, 1.0);
         Ok(Self { colors })
     }
@@ -123,12 +179,169 @@ impl Palette {
     }
 }
 
-#[derive(Default)]
+const BIN_BITS: u32 = 5;
+const BIN_COUNT: usize = 1 << (BIN_BITS * 3);
+const KMEANS_ITERATIONS: usize = 24;
+const KMEANS_EPSILON: f64 = 0.05;
+
+#[derive(Clone, Copy, Default)]
 struct Bin {
-    count: u64,
+    weight: u64,
     r: u64,
     g: u64,
     b: u64,
+}
+
+#[derive(Clone, Copy)]
+struct WeightedColor {
+    key: u32,
+    weight: f64,
+    rgb: [f64; 3],
+}
+
+impl WeightedColor {
+    fn to_color(self) -> Color {
+        Color::rgb(
+            self.rgb[0].round().clamp(0.0, 255.0) as u8,
+            self.rgb[1].round().clamp(0.0, 255.0) as u8,
+            self.rgb[2].round().clamp(0.0, 255.0) as u8,
+        )
+    }
+}
+
+fn weighted_kmeans(
+    entries: &[WeightedColor],
+    max_colors: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<Color>> {
+    let mut centers = initial_centers(entries, max_colors);
+    if centers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for _ in 0..KMEANS_ITERATIONS {
+        if is_cancelled(cancel) {
+            return Err(Error::Cancelled);
+        }
+
+        let mut sums = vec![[0.0f64; 3]; centers.len()];
+        let mut weights = vec![0.0f64; centers.len()];
+        for entry in entries {
+            let index = nearest_center(entry.rgb, &centers);
+            weights[index] += entry.weight;
+            for channel in 0..3 {
+                sums[index][channel] += entry.rgb[channel] * entry.weight;
+            }
+        }
+
+        let mut max_movement = 0.0f64;
+        for (index, center) in centers.iter_mut().enumerate() {
+            if weights[index] <= 0.0 {
+                continue;
+            }
+            let next = [
+                sums[index][0] / weights[index],
+                sums[index][1] / weights[index],
+                sums[index][2] / weights[index],
+            ];
+            let movement = distance_sq(next, *center).sqrt();
+            max_movement = max_movement.max(movement);
+            *center = next;
+        }
+
+        if max_movement <= KMEANS_EPSILON {
+            break;
+        }
+    }
+
+    // Final cluster weights decide the track order. This keeps the most
+    // frequently sounding colors at the front, like the old popularity
+    // palette, while the colors themselves are cluster centroids.
+    let mut cluster_weights = vec![0.0f64; centers.len()];
+    for entry in entries {
+        let index = nearest_center(entry.rgb, &centers);
+        cluster_weights[index] += entry.weight;
+    }
+
+    let mut order: Vec<usize> = (0..centers.len()).collect();
+    order.sort_by(|&a, &b| {
+        cluster_weights[b]
+            .total_cmp(&cluster_weights[a])
+            .then_with(|| a.cmp(&b))
+    });
+
+    let mut colors = Vec::with_capacity(centers.len());
+    for index in order {
+        let color = Color::rgb(
+            centers[index][0].round().clamp(0.0, 255.0) as u8,
+            centers[index][1].round().clamp(0.0, 255.0) as u8,
+            centers[index][2].round().clamp(0.0, 255.0) as u8,
+        );
+        if !colors.contains(&color) {
+            colors.push(color);
+        }
+    }
+    Ok(colors)
+}
+
+fn initial_centers(entries: &[WeightedColor], max_colors: usize) -> Vec<[f64; 3]> {
+    let mut centers = Vec::with_capacity(max_colors);
+    let Some(first) = entries.first() else {
+        return centers;
+    };
+    centers.push(first.rgb);
+
+    // Weighted k-means++ initialization: the next center is the bin with the
+    // largest "distance × weight", which favors both distant and common
+    // colors. Selection is deterministic because entries are already sorted.
+    while centers.len() < max_colors {
+        let mut best = None;
+        let mut best_score = 0.0f64;
+        for entry in entries {
+            let nearest = centers
+                .iter()
+                .map(|center| distance_sq(entry.rgb, *center))
+                .fold(f64::INFINITY, f64::min);
+            let score = nearest * entry.weight;
+            if score > best_score {
+                best_score = score;
+                best = Some(entry.rgb);
+            }
+        }
+        let Some(next) = best else {
+            break;
+        };
+        if best_score <= f64::EPSILON {
+            break;
+        }
+        centers.push(next);
+    }
+
+    centers
+}
+
+fn nearest_center(color: [f64; 3], centers: &[[f64; 3]]) -> usize {
+    let mut best = 0usize;
+    let mut best_distance = f64::INFINITY;
+    for (index, center) in centers.iter().enumerate() {
+        let distance = distance_sq(color, *center);
+        if distance < best_distance {
+            best_distance = distance;
+            best = index;
+        }
+    }
+    best
+}
+
+fn distance_sq(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let dr = a[0] - b[0];
+    let dg = a[1] - b[1];
+    let db = a[2] - b[2];
+    dr * dr + dg * dg + db * db
+}
+
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
 #[cfg(test)]
@@ -145,13 +358,50 @@ mod tests {
     }
 
     #[test]
-    fn palette_is_ordered_by_frequency() {
+    fn palette_is_ordered_by_weight() {
         let mut image = RgbaImage::new(3, 1, Color::BLACK);
         image.set_pixel(0, 0, Color::rgb(255, 0, 0));
         image.set_pixel(1, 0, Color::rgb(0, 0, 255));
         image.set_pixel(2, 0, Color::rgb(0, 0, 255));
         let palette = Palette::from_image(&image, 2);
-        assert_eq!(palette.colors[0], Color::rgb(0, 0, 255));
-        assert_eq!(palette.colors[1], Color::rgb(255, 0, 0));
+        assert_eq!(palette.len(), 2);
+        // Blue is the heavier cluster; the exact centroid can include the
+        // black pixel because k-means minimizes error rather than preserving
+        // popularity colors verbatim.
+        assert!(palette.colors[0].b > palette.colors[0].r);
+        assert!(palette.colors[1].r > palette.colors[1].b);
+    }
+
+    #[test]
+    fn all_frames_share_one_palette() {
+        let red = RgbaImage::new(2, 2, Color::rgb(255, 0, 0));
+        let blue = RgbaImage::new(2, 2, Color::rgb(0, 0, 255));
+        let palette =
+            Palette::from_frames_cancellable([&red, &blue], &[100, 100], 2, None, None).unwrap();
+
+        assert_eq!(palette.len(), 2);
+        assert!(
+            palette
+                .colors
+                .iter()
+                .any(|color| color.r > 200 && color.b == 0)
+        );
+        assert!(
+            palette
+                .colors
+                .iter()
+                .any(|color| color.b > 200 && color.r == 0)
+        );
+    }
+
+    #[test]
+    fn frame_delay_weights_palette_colors() {
+        let red = RgbaImage::new(1, 1, Color::rgb(255, 0, 0));
+        let blue = RgbaImage::new(1, 1, Color::rgb(0, 0, 255));
+        let palette =
+            Palette::from_frames_cancellable([&red, &blue], &[1000, 10], 1, None, None).unwrap();
+
+        assert_eq!(palette.len(), 1);
+        assert!(palette.colors[0].r > palette.colors[0].b);
     }
 }

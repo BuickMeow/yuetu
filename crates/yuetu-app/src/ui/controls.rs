@@ -1,8 +1,9 @@
 use egui::{RichText, Ui};
+use yuetu_core::PaletteScope;
 
 use crate::jobs::ProgressView;
 use crate::settings::Settings;
-use crate::state::{PipelineStage, Preview, SourceImage, StageStop};
+use crate::state::{CoordinateOrigin, PipelineStage, Preview, SourceImage, StageStop};
 use crate::theme;
 use crate::ui::{card_with_rect, section_title, setting_row};
 
@@ -12,6 +13,8 @@ pub struct Action {
     pub cancel: bool,
     pub export: bool,
     pub frame: Option<usize>,
+    pub rotation: Option<f32>,
+    pub reset: bool,
 }
 
 pub struct Output {
@@ -23,6 +26,7 @@ pub struct Output {
 pub fn show(
     ui: &mut Ui,
     settings: &mut Settings,
+    coordinate_origin: &mut CoordinateOrigin,
     source: Option<&SourceImage>,
     preview: Option<&Preview>,
     is_running: bool,
@@ -51,8 +55,8 @@ pub fn show(
                     if source.frame_count() > 1 {
                         ui.label(format!(
                             "{} × {} px · {} 帧",
-                            source.image.width,
-                            source.image.height,
+                            source.display_image.width,
+                            source.display_image.height,
                             source.frame_count()
                         ));
                         setting_row(ui, "帧", |ui| {
@@ -71,12 +75,42 @@ pub fn show(
                     } else {
                         ui.label(format!(
                             "{} × {} px",
-                            source.image.width, source.image.height
+                            source.display_image.width, source.display_image.height
                         ));
                     }
+
+                    setting_row(ui, "旋转", |ui| {
+                        let response = ui.add(
+                            egui::DragValue::new(&mut settings.rotation_deg)
+                                .range(-180.0..=180.0)
+                                .speed(1.0)
+                                .max_decimals(1)
+                                .suffix("°"),
+                        );
+                        if response.changed() {
+                            action.rotation = Some(settings.rotation_deg);
+                        }
+                    });
                 } else {
                     ui.label("尚未打开图片");
                 }
+
+                setting_row(ui, "坐标原点", |ui| {
+                    egui::ComboBox::from_id_salt("coordinate_origin")
+                        .selected_text(coordinate_origin.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                coordinate_origin,
+                                CoordinateOrigin::TopLeft,
+                                CoordinateOrigin::TopLeft.label(),
+                            );
+                            ui.selectable_value(
+                                coordinate_origin,
+                                CoordinateOrigin::BottomLeft,
+                                CoordinateOrigin::BottomLeft.label(),
+                            );
+                        });
+                });
             });
             stops.push(StageStop {
                 stage: PipelineStage::Source,
@@ -174,6 +208,22 @@ pub fn show(
                             .range(1..=256)
                             .speed(1.0),
                     );
+                });
+                setting_row(ui, "色板范围", |ui| {
+                    egui::ComboBox::from_id_salt("palette_scope")
+                        .selected_text(settings.palette_scope.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut settings.palette_scope,
+                                PaletteScope::AllFrames,
+                                PaletteScope::AllFrames.label(),
+                            );
+                            ui.selectable_value(
+                                &mut settings.palette_scope,
+                                PaletteScope::CurrentFrame,
+                                PaletteScope::CurrentFrame.label(),
+                            );
+                        });
                 });
 
                 if let Some(preview) = preview {
@@ -281,6 +331,7 @@ pub fn show(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("重置全部参数").clicked() {
                     *settings = Settings::default();
+                    action.reset = true;
                 }
             });
         });

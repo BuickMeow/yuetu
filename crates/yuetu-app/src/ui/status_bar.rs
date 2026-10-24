@@ -4,7 +4,9 @@ use egui_material_icons::MaterialIcon;
 use egui_material_icons::icons::{ICON_FIT_SCREEN, ICON_FULLSCREEN, ICON_PERCENT};
 use yuetu_core::{Color, note_name};
 
-use crate::state::{PipelineStage, StageHover, StatusKind, StatusMessage, ZoomPreset};
+use crate::state::{
+    CoordinateOrigin, PipelineStage, StageHover, StatusKind, StatusMessage, ZoomPreset,
+};
 use crate::theme;
 
 const CONTROL_SIZE: egui::Vec2 = egui::vec2(64.0, 26.0);
@@ -21,6 +23,7 @@ pub fn show(
     status: &StatusMessage,
     stage: PipelineStage,
     hover: Option<StageHover>,
+    coordinate_origin: CoordinateOrigin,
     zoom_percent: f32,
     zoom_mode: ZoomPreset,
     zoom_enabled: bool,
@@ -46,7 +49,7 @@ pub fn show(
                 .size(Size::exact(CONTROL_SIZE.x))
                 .horizontal(|mut strip| {
                     strip.cell(|ui| {
-                        status_cell(ui, status, status_color, hover);
+                        status_cell(ui, status, status_color, hover, coordinate_origin);
                     });
 
                     strip.cell(|ui| {
@@ -93,6 +96,7 @@ fn status_cell(
     status: &StatusMessage,
     status_color: egui::Color32,
     hover: Option<StageHover>,
+    coordinate_origin: CoordinateOrigin,
 ) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
@@ -101,22 +105,29 @@ fn status_cell(
 
         if let Some(hover) = hover {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                hover_info(ui, hover)
+                hover_info(ui, hover, coordinate_origin)
             });
         }
     });
 }
 
-fn hover_info(ui: &mut Ui, hover: StageHover) {
+fn hover_info(ui: &mut Ui, hover: StageHover, coordinate_origin: CoordinateOrigin) {
     match hover {
-        StageHover::Source { pos, color } => {
+        StageHover::Source { pos, color, height } => {
             color_swatch(ui, color);
-            ui.label(format!("({}, {}) {}", pos.0, pos.1, color.hex()));
+            let y = coordinate_origin.display_y(pos.1, height);
+            ui.label(format!("({}, {}) {}", pos.0, y, color.hex()));
         }
-        StageHover::KeyMap { pos, color, key } => {
+        StageHover::KeyMap {
+            pos,
+            color,
+            key,
+            height,
+        } => {
             color_swatch(ui, color);
             let mapped = key.map(note_name).unwrap_or_else(|| "静音".to_owned());
-            ui.label(format!("({}, {}) · {}", pos.0, pos.1, mapped));
+            let y = coordinate_origin.display_y(pos.1, height);
+            ui.label(format!("({}, {}) · {}", pos.0, y, mapped));
         }
         StageHover::Palette { index, color } => {
             color_swatch(ui, color);

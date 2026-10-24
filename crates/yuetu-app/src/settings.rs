@@ -1,6 +1,8 @@
 //! UI-facing conversion settings.
 
-use yuetu_core::{ColumnMapping, ConversionConfig, KeyFilter, MidiOutputConfig, ResizeAlgorithm};
+use yuetu_core::{
+    ColumnMapping, ConversionConfig, KeyFilter, MidiOutputConfig, PaletteScope, ResizeAlgorithm,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -9,7 +11,9 @@ pub struct Settings {
     pub key_filter: KeyFilter,
     pub column_mapping: ColumnMapping,
     pub palette_colors: usize,
+    pub palette_scope: PaletteScope,
     pub resize: ResizeAlgorithm,
+    pub rotation_deg: f32,
     pub target_height: u32,
     pub limit_note_length: bool,
     pub max_note_length: u32,
@@ -30,7 +34,9 @@ impl Default for Settings {
             key_filter: KeyFilter::All,
             column_mapping: ColumnMapping::Filled,
             palette_colors: 16,
+            palette_scope: PaletteScope::AllFrames,
             resize: ResizeAlgorithm::Area,
+            rotation_deg: 0.0,
             target_height: 0,
             limit_note_length: false,
             max_note_length: 5,
@@ -54,7 +60,9 @@ impl Settings {
             column_mapping: self.column_mapping,
             palette_colors: self.palette_colors.max(1),
             manual_palette: None,
+            palette_scope: self.palette_scope,
             resize: self.resize,
+            rotation_deg: self.rotation_deg,
             target_height: self.target_height,
             max_note_length: if self.limit_note_length {
                 self.max_note_length.max(1)

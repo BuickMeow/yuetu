@@ -15,6 +15,27 @@ use crate::palette::Palette;
 use crate::progress::{Progress, Stage, report};
 use crate::quantize::{IndexedImage, quantize_with_progress};
 use crate::resize::{ResizeAlgorithm, resize};
+use crate::rotate::{normalize_degrees, rotate_image};
+
+/// Which pixels feed the automatic palette.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PaletteScope {
+    /// Cluster the current frame only.
+    CurrentFrame,
+    /// Cluster every frame of the animation, weighted by frame delay, so all
+    /// frames share one palette and one set of note tracks.
+    #[default]
+    AllFrames,
+}
+
+impl PaletteScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CurrentFrame => "当前帧",
+            Self::AllFrames => "所有帧",
+        }
+    }
+}
 
 /// Everything that affects the *preview* (not MIDI timing).
 #[derive(Clone, Debug, PartialEq)]
@@ -27,7 +48,10 @@ pub struct ConversionConfig {
     pub palette_colors: usize,
     /// Optional manual palette. If present, `palette_colors` is ignored.
     pub manual_palette: Option<Palette>,
+    pub palette_scope: PaletteScope,
     pub resize: ResizeAlgorithm,
+    /// Clockwise source rotation in degrees before resizing.
+    pub rotation_deg: f32,
     /// `0` = derive height from the source aspect ratio.
     pub target_height: u32,
     /// `0` = notes ring for the whole color run.
@@ -45,7 +69,9 @@ impl Default for ConversionConfig {
             column_mapping: ColumnMapping::Filled,
             palette_colors: 16,
             manual_palette: None,
+            palette_scope: PaletteScope::AllFrames,
             resize: ResizeAlgorithm::Area,
+            rotation_deg: 0.0,
             target_height: 0,
             max_note_length: 0,
             measure_from_image_start: false,
@@ -99,12 +125,17 @@ pub fn convert(image: &RgbaImage, config: &ConversionConfig) -> Result<Conversio
     convert_with_progress(image, config, None, &AtomicBool::new(false))
 }
 
-/// Convert with optional progress reporting and cooperative cancellation.
+/// Convert one frame, optionally using a shared palette built from a whole
+/// animation sequence.
 ///
-/// The progress callback is invoked from the calling thread. The app moves
-/// this call to a worker thread and forwards reports to the UI via a channel.
-pub fn convert_with_progress(
+/// `palette_frames` is the complete, *unrotated* sequence. Rotation is a
+/// geometric operation and does not change the color distribution, so the
+/// shared palette can be computed without rotating every frame. The selected
+/// `image` is rotated before resizing.
+pub fn convert_frames_with_progress(
     image: &RgbaImage,
+    palette_frames: &[&RgbaImage],
+    delays_ms: &[u32],
     config: &ConversionConfig,
     progress: Option<&dyn Progress>,
     cancel: &AtomicBool,
@@ -123,12 +154,28 @@ pub fn convert_with_progress(
         config.column_mapping,
     )?;
 
+    let rotated = if normalize_degrees(config.rotation_deg) == 0.0 {
+        None
+    } else {
+        Some(rotate_image(image, config.rotation_deg)?)
+    };
+    let source = rotated.as_ref().unwrap_or(image);
+
     report(progress, Stage::Palette, 0.0);
     let palette = match &config.manual_palette {
         Some(palette) if !palette.is_empty() => palette.clone(),
         Some(_) => return Err(Error::Config("手动调色板不能为空".into())),
+        None if config.palette_scope == PaletteScope::AllFrames && !palette_frames.is_empty() => {
+            Palette::from_frames_cancellable(
+                palette_frames.iter().copied(),
+                delays_ms,
+                config.palette_colors.max(1),
+                Some(cancel),
+                progress,
+            )?
+        }
         None => Palette::from_image_cancellable(
-            image,
+            source,
             config.palette_colors.max(1),
             Some(cancel),
             progress,
@@ -150,7 +197,7 @@ pub fn convert_with_progress(
     let target_height = if config.target_height > 0 {
         config.target_height
     } else {
-        ((image.height as f64) * (target_width as f64) / (image.width as f64))
+        ((source.height as f64) * (target_width as f64) / (source.width as f64))
             .round()
             .max(1.0) as u32
     };
@@ -165,7 +212,7 @@ pub fn convert_with_progress(
     }
 
     report(progress, Stage::Resize, 0.0);
-    let resized = resize(image, target_width, target_height, config.resize)?;
+    let resized = resize(source, target_width, target_height, config.resize)?;
     report(progress, Stage::Resize, 1.0);
     if cancel.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
@@ -189,12 +236,25 @@ pub fn convert_with_progress(
         key_start: config.key_start,
         key_end: config.key_end,
         duration_px: target_height,
-        source_size: (image.width, image.height),
+        source_size: (source.width, source.height),
         resized_size: (target_width, target_height),
         resized_image: resized,
         indexed_image: indexed,
         note_count_by_track,
     })
+}
+
+/// Convert with optional progress reporting and cooperative cancellation.
+///
+/// The progress callback is invoked from the calling thread. The app moves
+/// this call to a worker thread and forwards reports to the UI via a channel.
+pub fn convert_with_progress(
+    image: &RgbaImage,
+    config: &ConversionConfig,
+    progress: Option<&dyn Progress>,
+    cancel: &AtomicBool,
+) -> Result<ConversionResult> {
+    convert_frames_with_progress(image, &[], &[], config, progress, cancel)
 }
 
 #[cfg(test)]
@@ -338,5 +398,100 @@ mod tests {
         assert!(reports.iter().any(|(stage, fraction)| {
             *stage == Stage::Palette && *fraction > 0.0 && *fraction < 1.0
         }));
+    }
+
+    #[test]
+    fn shared_palette_contains_colors_from_every_frame() {
+        let selected = RgbaImage::new(2, 2, Color::rgb(255, 0, 0));
+        let other = RgbaImage::new(2, 2, Color::rgb(0, 0, 255));
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 60,
+            palette_colors: 2,
+            palette_scope: PaletteScope::AllFrames,
+            ..ConversionConfig::default()
+        };
+        let cancel = AtomicBool::new(false);
+
+        let result = convert_frames_with_progress(
+            &selected,
+            &[&selected, &other],
+            &[100, 100],
+            &config,
+            None,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(result.palette.len(), 2);
+        assert!(result.palette.colors.iter().any(|color| color.r > 200));
+        assert!(result.palette.colors.iter().any(|color| color.b > 200));
+    }
+
+    #[test]
+    fn shared_palette_is_identical_for_every_selected_frame() {
+        let red = RgbaImage::new(2, 2, Color::rgb(255, 0, 0));
+        let blue = RgbaImage::new(2, 2, Color::rgb(0, 0, 255));
+        let frames = [&red, &blue];
+        let delays = [100, 300];
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 60,
+            palette_colors: 2,
+            palette_scope: PaletteScope::AllFrames,
+            ..ConversionConfig::default()
+        };
+        let cancel = AtomicBool::new(false);
+
+        let first =
+            convert_frames_with_progress(&red, &frames, &delays, &config, None, &cancel).unwrap();
+        let second =
+            convert_frames_with_progress(&blue, &frames, &delays, &config, None, &cancel).unwrap();
+
+        assert_eq!(first.palette, second.palette);
+    }
+
+    #[test]
+    fn current_frame_scope_ignores_other_frames() {
+        let selected = RgbaImage::new(2, 2, Color::rgb(255, 0, 0));
+        let other = RgbaImage::new(2, 2, Color::rgb(0, 0, 255));
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 60,
+            palette_colors: 2,
+            palette_scope: PaletteScope::CurrentFrame,
+            ..ConversionConfig::default()
+        };
+        let cancel = AtomicBool::new(false);
+
+        let result = convert_frames_with_progress(
+            &selected,
+            &[&selected, &other],
+            &[100, 100],
+            &config,
+            None,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(result.palette.len(), 1);
+        assert_eq!(result.palette.colors[0], Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn rotation_expands_the_source_before_resizing() {
+        let image = RgbaImage::new(4, 2, Color::rgb(255, 0, 0));
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 60,
+            palette_colors: 1,
+            rotation_deg: 90.0,
+            ..ConversionConfig::default()
+        };
+        let cancel = AtomicBool::new(false);
+
+        let result = convert_with_progress(&image, &config, None, &cancel).unwrap();
+        assert_eq!(result.source_size, (2, 4));
+        assert_eq!(result.resized_size, (1, 2));
     }
 }

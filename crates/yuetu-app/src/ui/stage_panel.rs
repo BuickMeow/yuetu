@@ -3,7 +3,7 @@ use egui_extras::{Size, StripBuilder};
 use yuetu_core::Color;
 
 use crate::jobs::ProgressView;
-use crate::state::{PipelineStage, Preview, SourceImage, StageHover};
+use crate::state::{CoordinateOrigin, PipelineStage, Preview, SourceImage, StageHover};
 use crate::theme;
 use crate::widgets::{View2D, midi_preview, stage_image};
 
@@ -16,6 +16,7 @@ pub struct Action {
 pub fn show(
     ui: &mut Ui,
     stage: PipelineStage,
+    coordinate_origin: CoordinateOrigin,
     source: Option<&SourceImage>,
     preview: Option<&Preview>,
     view: &mut View2D,
@@ -39,16 +40,18 @@ pub fn show(
                 ui,
                 view,
                 source.texture.id(),
-                (source.image.width, source.image.height),
+                (source.display_image.width, source.display_image.height),
                 source.has_transparency,
                 checker_texture,
+                coordinate_origin,
             );
             *hover = hovered.map(|pixel| StageHover::Source {
                 pos: (pixel.x, pixel.y),
                 color: source
-                    .image
+                    .display_image
                     .pixel(pixel.x, pixel.y)
                     .unwrap_or(Color::TRANSPARENT),
+                height: source.display_image.height,
             });
         }
         PipelineStage::KeyMap | PipelineStage::Palette | PipelineStage::Midi => {
@@ -67,6 +70,7 @@ pub fn show(
                         preview.result.resized_size,
                         preview.resized_has_transparency,
                         checker_texture,
+                        coordinate_origin,
                     );
                     *hover = hovered.map(|pixel| StageHover::KeyMap {
                         pos: (pixel.x, pixel.y),
@@ -76,6 +80,7 @@ pub fn show(
                             .pixel(pixel.x, pixel.y)
                             .unwrap_or(Color::TRANSPARENT),
                         key: preview.result.keymap.key_at(pixel.x),
+                        height: preview.result.resized_size.1,
                     });
                 }
                 PipelineStage::Palette => {
@@ -89,6 +94,7 @@ pub fn show(
                         ),
                         preview.indexed_has_transparency,
                         checker_texture,
+                        coordinate_origin,
                     );
                     *hover = hovered.map(|pixel| {
                         let index = preview.result.indexed_image.at(pixel.x, pixel.y);
