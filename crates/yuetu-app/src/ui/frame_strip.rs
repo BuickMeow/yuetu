@@ -3,6 +3,10 @@
 //! Small animations use thumbnails; long sequences switch to a compact
 //! timeline with adaptive frame numbers and a playhead. This keeps a
 //! 5000-frame sequence usable instead of allocating 5000 thumbnail cells.
+//!
+//! Both modes report whether the frame was changed by an active drag so the
+//! app can show intermediate source frames without restarting conversion for
+//! every pixel of the scrub gesture.
 
 use egui::scroll_area::ScrollBarVisibility;
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui};
@@ -53,16 +57,25 @@ const TIMELINE_HEIGHT: f32 = 56.0;
 const TIMELINE_RULER_HEIGHT: f32 = 18.0;
 const MODE_BUTTON_SIZE: f32 = 28.0;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Output {
+    /// Frame selected by a click or drag.
+    pub frame: Option<usize>,
+    /// Pointer is currently dragging. The source frame should update, but
+    /// conversion should wait until the drag ends.
+    pub scrubbing: bool,
+}
+
 /// Returns the frame clicked or dragged to in this frame.
 pub fn show(
     ui: &mut Ui,
     source: &mut SourceImage,
     last_selected: &mut usize,
     mode: &mut FrameStripMode,
-) -> Option<usize> {
+) -> Output {
     let frame_count = source.frame_count();
     if frame_count <= 1 {
-        return None;
+        return Output::default();
     }
 
     let selected = source.frame_index();
@@ -70,13 +83,13 @@ pub fn show(
     *last_selected = selected;
 
     let current_mode = *mode;
-    let mut chosen = None;
+    let mut output = Output::default();
     StripBuilder::new(ui)
         .size(Size::remainder())
         .size(Size::exact(MODE_BUTTON_SIZE))
         .horizontal(|mut strip| {
             strip.cell(|ui| {
-                chosen = match current_mode {
+                output = match current_mode {
                     FrameStripMode::Thumbnails => {
                         show_thumbnails(ui, source, selected, scroll_to_selected)
                     }
@@ -98,10 +111,10 @@ pub fn show(
             });
         });
 
-    if let Some(index) = chosen {
+    if let Some(index) = output.frame {
         *last_selected = index;
     }
-    chosen
+    output
 }
 
 fn show_thumbnails(
@@ -109,21 +122,27 @@ fn show_thumbnails(
     source: &mut SourceImage,
     selected: usize,
     scroll_to_selected: bool,
-) -> Option<usize> {
+) -> Output {
     let frame_count = source.frame_count();
     let total_width = frame_count as f32 * THUMBNAIL_STRIDE - THUMBNAIL_CELL_GAP;
     let scroll_bar_visibility = scroll_bar_visibility(ui, total_width);
-    let mut chosen = None;
+    let mut output = Output::default();
 
     egui::ScrollArea::horizontal()
         .id_salt("frame_strip_scroll")
         .auto_shrink([false, true])
         .scroll_bar_visibility(scroll_bar_visibility)
         .show_viewport(ui, |ui, viewport| {
-            let (content_rect, _) = ui.allocate_exact_size(
+            let (content_rect, response) = ui.allocate_exact_size(
                 egui::vec2(total_width, THUMBNAIL_CELL_HEIGHT),
-                Sense::hover(),
+                Sense::click_and_drag(),
             );
+            let pointer = response
+                .interact_pointer_pos()
+                .or_else(|| response.hover_pos());
+            let hovered = pointer
+                .filter(|pos| content_rect.contains(*pos))
+                .map(|pos| frame_at(pos.x, content_rect, THUMBNAIL_STRIDE, frame_count));
 
             let first = ((viewport.min.x / THUMBNAIL_STRIDE).floor() as usize).min(frame_count);
             let last = ((viewport.max.x / THUMBNAIL_STRIDE).ceil() as usize).min(frame_count);
@@ -133,14 +152,8 @@ fn show_thumbnails(
                     content_rect.min + egui::vec2(index as f32 * THUMBNAIL_STRIDE, 0.0),
                     egui::vec2(THUMBNAIL_CELL_WIDTH, THUMBNAIL_CELL_HEIGHT),
                 );
-                let response =
-                    ui.interact(cell, ui.scope_id().with(("frame", index)), Sense::click());
-                if response.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-
                 let is_selected = index == selected;
-                let background = if response.hovered() {
+                let background = if hovered == Some(index) {
                     ui.visuals().widgets.hovered.weak_bg_fill
                 } else {
                     theme::view_bg(ui)
@@ -187,11 +200,18 @@ fn show_thumbnails(
                     FontId::proportional(9.0),
                     number_color,
                 );
+            }
 
-                if response.clicked() {
-                    chosen = Some(index);
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if response.clicked() || response.dragged() || response.drag_stopped() {
+                if let Some(pos) = pointer {
+                    output.frame =
+                        Some(frame_at(pos.x, content_rect, THUMBNAIL_STRIDE, frame_count));
                 }
             }
+            output.scrubbing = response.dragged();
 
             if scroll_to_selected && (selected < first || selected >= last) {
                 let selected_rect = Rect::from_min_size(
@@ -202,7 +222,7 @@ fn show_thumbnails(
             }
         });
 
-    chosen
+    output
 }
 
 fn show_timeline(
@@ -210,10 +230,10 @@ fn show_timeline(
     frame_count: usize,
     selected: usize,
     scroll_to_selected: bool,
-) -> Option<usize> {
+) -> Output {
     let total_width = frame_count as f32 * TIMELINE_FRAME_WIDTH;
     let scroll_bar_visibility = scroll_bar_visibility(ui, total_width);
-    let mut chosen = None;
+    let mut output = Output::default();
 
     egui::ScrollArea::horizontal()
         .id_salt("frame_timeline_scroll")
@@ -306,15 +326,16 @@ fn show_timeline(
             if response.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            if (response.clicked() || response.dragged())
-                && let Some(pointer) = response.interact_pointer_pos()
-            {
-                let index = ((pointer.x - rect.left()) / TIMELINE_FRAME_WIDTH)
-                    .floor()
-                    .clamp(0.0, frame_count.saturating_sub(1) as f32)
-                    as usize;
-                chosen = Some(index);
+            if response.clicked() || response.dragged() || response.drag_stopped() {
+                if let Some(pointer) = response
+                    .interact_pointer_pos()
+                    .or_else(|| response.hover_pos())
+                {
+                    output.frame =
+                        Some(frame_at(pointer.x, rect, TIMELINE_FRAME_WIDTH, frame_count));
+                }
             }
+            output.scrubbing = response.dragged();
 
             if scroll_to_selected && (selected < first || selected >= last) {
                 let selected_rect = Rect::from_min_size(
@@ -325,7 +346,12 @@ fn show_timeline(
             }
         });
 
-    chosen
+    output
+}
+
+fn frame_at(x: f32, content_rect: Rect, stride: f32, frame_count: usize) -> usize {
+    (((x - content_rect.left()) / stride).floor() as i32)
+        .clamp(0, frame_count.saturating_sub(1) as i32) as usize
 }
 
 fn timeline_label_step(frame_width: f32) -> usize {
@@ -377,5 +403,14 @@ mod tests {
         assert_eq!(timeline_label_step(10.0), 5);
         assert_eq!(timeline_label_step(1.0), 50);
         assert_eq!(timeline_label_step(0.0), 50);
+    }
+
+    #[test]
+    fn frame_at_clamps_to_sequence() {
+        let rect = Rect::from_min_size(egui::pos2(10.0, 0.0), egui::vec2(80.0, 20.0));
+        assert_eq!(frame_at(10.0, rect, 10.0, 8), 0);
+        assert_eq!(frame_at(89.0, rect, 10.0, 8), 7);
+        assert_eq!(frame_at(200.0, rect, 10.0, 8), 7);
+        assert_eq!(frame_at(0.0, rect, 10.0, 8), 0);
     }
 }

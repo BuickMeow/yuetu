@@ -1,11 +1,9 @@
-use egui::{RichText, Ui};
-use yuetu_core::PaletteScope;
-
 use crate::jobs::ProgressView;
 use crate::settings::Settings;
 use crate::state::{CoordinateOrigin, PipelineStage, Preview, SourceImage, StageStop};
 use crate::theme;
 use crate::ui::{card_with_rect, section_title, setting_row};
+use egui::{RichText, Ui};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Action {
@@ -209,23 +207,6 @@ pub fn show(
                             .speed(1.0),
                     );
                 });
-                setting_row(ui, "色板范围", |ui| {
-                    egui::ComboBox::from_id_salt("palette_scope")
-                        .selected_text(settings.palette_scope.label())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut settings.palette_scope,
-                                PaletteScope::AllFrames,
-                                PaletteScope::AllFrames.label(),
-                            );
-                            ui.selectable_value(
-                                &mut settings.palette_scope,
-                                PaletteScope::CurrentFrame,
-                                PaletteScope::CurrentFrame.label(),
-                            );
-                        });
-                });
-
                 if let Some(preview) = preview {
                     ui.add_space(4.0);
                     palette_swatches(ui, preview);

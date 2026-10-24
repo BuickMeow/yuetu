@@ -44,6 +44,7 @@ pub struct YuetuApp {
     coordinate_origin: CoordinateOrigin,
     frame_strip_last_frame: usize,
     frame_strip_mode: ui::frame_strip::FrameStripMode,
+    frame_scrub_pending: bool,
     checker_texture: egui::TextureHandle,
     gpu_target_format: eframe::wgpu::TextureFormat,
     source_view: View2D,
@@ -90,6 +91,7 @@ impl YuetuApp {
             coordinate_origin: CoordinateOrigin::TopLeft,
             frame_strip_last_frame: 0,
             frame_strip_mode: ui::frame_strip::FrameStripMode::default(),
+            frame_scrub_pending: false,
             checker_texture,
             gpu_target_format,
             source_view: View2D::default(),
@@ -151,6 +153,7 @@ impl YuetuApp {
                 self.stage = PipelineStage::Source;
                 self.stage_hover = None;
                 self.frame_strip_last_frame = 0;
+                self.frame_scrub_pending = false;
                 self.source_view.reset_fit();
                 self.key_view.reset_fit();
                 self.palette_view.reset_fit();
@@ -284,6 +287,7 @@ impl YuetuApp {
             return;
         }
         self.jobs.cancel();
+        self.frame_scrub_pending = false;
         self.job_progress = None;
         self.job_config = None;
         self.job_source_revision = None;
@@ -293,7 +297,11 @@ impl YuetuApp {
     }
 
     /// Select a GIF/WebP frame from the sidebar or the frame strip.
-    fn select_source_frame(&mut self, ctx: &egui::Context, frame: usize) -> bool {
+    ///
+    /// A live frame-strip drag updates the source texture immediately but
+    /// suspends conversion until the drag ends. This is what makes intermediate
+    /// frames visible without spending the whole gesture on cancelled jobs.
+    fn select_source_frame(&mut self, ctx: &egui::Context, frame: usize, live: bool) -> bool {
         let Some(source) = self.source.as_mut() else {
             return false;
         };
@@ -301,8 +309,15 @@ impl YuetuApp {
             Ok(true) => {
                 self.source_revision = self.source_revision.wrapping_add(1);
                 self.stage_hover = None;
-                self.status = StatusMessage::info("正在更新预览…");
-                self.schedule_auto_conversion(ctx, AUTO_CONVERT_DEBOUNCE);
+                if live {
+                    self.suspend_conversion_for_scrub();
+                    self.frame_scrub_pending = true;
+                    self.status = StatusMessage::info("浏览帧…");
+                } else {
+                    self.frame_scrub_pending = false;
+                    self.status = StatusMessage::info("正在更新预览…");
+                    self.schedule_auto_conversion(ctx, AUTO_CONVERT_DEBOUNCE);
+                }
                 true
             }
             Ok(false) => false,
@@ -311,6 +326,18 @@ impl YuetuApp {
                 false
             }
         }
+    }
+
+    fn suspend_conversion_for_scrub(&mut self) {
+        self.auto_convert_at = None;
+        if self.jobs.is_running() {
+            self.jobs.cancel();
+        }
+        self.job_progress = None;
+        self.job_config = None;
+        self.job_source_revision = None;
+        self.job_source_generation = None;
+        self.job_started = None;
     }
 
     fn poll_jobs(&mut self, ctx: &egui::Context) {
@@ -584,7 +611,7 @@ impl eframe::App for YuetuApp {
         let checker_texture = self.checker_texture.id();
         let gpu_target_format = self.gpu_target_format;
         let mut stage_action = ui::stage_panel::Action::default();
-        let mut frame_strip_action = None;
+        let mut frame_strip_output = ui::frame_strip::Output::default();
         egui::CentralPanel::default()
             .frame(theme::panel_frame(ui, theme::PanelKind::Central))
             .show(ui, |ui| {
@@ -599,7 +626,7 @@ impl eframe::App for YuetuApp {
                             .show_separator_line(false)
                             .frame(theme::panel_frame(ui, theme::PanelKind::FrameStrip))
                             .show(ui, |ui| {
-                                frame_strip_action =
+                                frame_strip_output =
                                     ui::frame_strip::show(ui, source, last_frame, mode);
                             });
                     }
@@ -654,10 +681,13 @@ impl eframe::App for YuetuApp {
             acted = true;
         }
         if let Some(frame) = controls_action.frame {
-            acted |= self.select_source_frame(&ctx, frame);
+            acted |= self.select_source_frame(&ctx, frame, false);
         }
-        if let Some(frame) = frame_strip_action {
-            acted |= self.select_source_frame(&ctx, frame);
+        if let Some(frame) = frame_strip_output.frame {
+            acted |= self.select_source_frame(&ctx, frame, frame_strip_output.scrubbing);
+        }
+        if frame_strip_output.scrubbing {
+            self.frame_scrub_pending = true;
         }
         if let Some(degrees) = controls_action.rotation {
             if let Some(source) = self.source.as_mut() {
@@ -717,6 +747,13 @@ impl eframe::App for YuetuApp {
         }
         if let Some(percent) = status_action.set_zoom_percent {
             self.current_view_mut().set_absolute_zoom_percent(percent);
+            acted = true;
+        }
+
+        if self.frame_scrub_pending && !ctx.input(|input| input.pointer.primary_down()) {
+            self.frame_scrub_pending = false;
+            self.status = StatusMessage::info("正在更新预览…");
+            self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
             acted = true;
         }
 

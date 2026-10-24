@@ -50,7 +50,7 @@ ImageSequence {
 }
 ```
 
-图片解码只负责得到像素。GIF/WebP 拆帧和选帧属于前处理；动画帧在 UI 线程一次性解码并设置内存上限。`convert_frames_with_progress()` 接收当前选中的那一帧，以及完整帧序列/帧延迟用于共享调色板。旋转是 `ConversionConfig.rotation_deg`，在 worker 里先于缩放执行；源图阶段只为当前帧生成一张旋转后的显示纹理，不阻塞 UI。
+图片解码只负责得到像素。GIF/WebP 拆帧和选帧属于前处理；动画帧在 UI 线程一次性解码并设置内存上限。`convert_frames_with_progress()` 接收当前选中的那一帧，以及完整帧序列/帧延迟用于共享调色板；动图没有“当前帧色板”选项，所有帧必须共用一套配色。旋转是 `ConversionConfig.rotation_deg`，在 worker 里先于缩放执行；源图阶段只为当前帧生成一张旋转后的显示纹理，不阻塞 UI。
 
 ### 3.2 中间表示
 
@@ -100,7 +100,7 @@ ConversionResult {
 validate config
   → KeyMap::build
   → rotate(rotation_deg)
-  → Palette::from_frames（所有帧加权；或当前帧 / 手动调色板）
+  → Palette::from_frames（动图所有帧加权 / 手动调色板）
   → resize(width = keymap.width, height = aspect)
   → quantize
   → generate_notes
@@ -133,7 +133,7 @@ validate config
 source: Option<SourceImage>   // 全部帧 + 当前帧 CPU 图 + 旋转显示图 + GPU 纹理
 source_revision: u64          // 图片、GIF 帧或旋转角度变化时递增
 preview: Option<Preview>      // ConversionResult + 配置 + 阶段纹理
-settings: Settings            // UI 参数（含旋转、色板范围）
+settings: Settings            // UI 参数（含旋转、颜色数）
 stage: PipelineStage          // 当前流水线阶段
 stage_stops: Vec<StageStop>   // 左侧卡片中心，供图标滑块吸附
 coordinate_origin             // 标尺/悬停坐标原点：左上角或左下角
@@ -218,7 +218,7 @@ MIDI 阶段的坐标单位是“列 × pixel-tick”，不是屏幕像素；因�
 
 1. `源图`：原始图像 + Photoshop 风格像素标尺；可设旋转角度（正值顺时针），标尺原点可切到左下角；
 2. `键位映射`：按 `KeyMap::width()` 缩放后的图片，保持宽高比；
-3. `调色板`：`IndexedImage` 按调色板还原成索引色图，悬停显示索引和色号；色板范围可选“所有帧”或“当前帧”；
+3. `调色板`：`IndexedImage` 按调色板还原成索引色图，悬停显示索引和色号；动图始终使用所有帧的共享色板；
 4. `MIDI 生成`：钢琴卷帘音符；音符长度/切分设置也归入这一阶段。
 
 标尺左上角是明确的 corner cell（横/纵标尺交汇格），不是漏画；它的右边和下边与标尺分隔线相连。坐标原点为左下角时，纵轴标签按 `height - 1 - row` 显示，底部像素行为 0，顶部为 `height - 1`；状态栏悬停坐标同步使用同一转换。
@@ -235,7 +235,7 @@ MIDI 阶段的坐标单位是“列 × pixel-tick”，不是屏幕像素；因�
 
 - 默认显示缩略图：每帧一个固定宽度 cell，显示缩略图、帧号；
 - 右侧模式按钮可切换到紧凑时间轴，显示连续帧刻度、每 5/10/... 帧的编号、当前帧色带和播放头；再点一次切回缩略图；切换模式后自动滚到当前帧；
-- 两种模式都支持点击选帧；时间轴还支持按住拖动播放头扫帧；
+- 两种模式都支持点击选帧；时间轴还支持按住拖动播放头扫帧；拖动期间只更新源图当前帧并暂停转换，松手后才为最终帧启动一次转换；
 - 当前帧不画边框，用底部/整格色带和播放头区分；
 - 帧数超出宽度时显示横向滚动条；短动画不显示滚动条；
 - 缩略图按需生成（只生成可见 cell），旋转变化时清空缓存；
