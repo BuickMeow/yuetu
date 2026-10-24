@@ -46,6 +46,7 @@ pub struct YuetuApp {
     frame_strip_mode: ui::frame_strip::FrameStripMode,
     frame_scrub_pending: bool,
     rotation_scrub_pending: bool,
+    settings_scrub_pending: bool,
     checker_texture: egui::TextureHandle,
     gpu_target_format: eframe::wgpu::TextureFormat,
     source_view: View2D,
@@ -94,6 +95,7 @@ impl YuetuApp {
             frame_strip_mode: ui::frame_strip::FrameStripMode::default(),
             frame_scrub_pending: false,
             rotation_scrub_pending: false,
+            settings_scrub_pending: false,
             checker_texture,
             gpu_target_format,
             source_view: View2D::default(),
@@ -157,6 +159,7 @@ impl YuetuApp {
                 self.frame_strip_last_frame = 0;
                 self.frame_scrub_pending = false;
                 self.rotation_scrub_pending = false;
+                self.settings_scrub_pending = false;
                 self.source_view.reset_fit();
                 self.key_view.reset_fit();
                 self.palette_view.reset_fit();
@@ -338,6 +341,8 @@ impl YuetuApp {
         }
         self.jobs.cancel();
         self.frame_scrub_pending = false;
+        self.rotation_scrub_pending = false;
+        self.settings_scrub_pending = false;
         self.job_progress = None;
         self.job_config = None;
         self.job_source_revision = None;
@@ -772,6 +777,24 @@ impl eframe::App for YuetuApp {
             }
         }
 
+        if let Some(live) = controls_action.live_setting {
+            self.suspend_conversion_for_scrub();
+            self.settings_scrub_pending = true;
+            self.status = StatusMessage::info(match live {
+                ui::controls::LiveSetting::KeyMap => "调整键位…",
+                ui::controls::LiveSetting::TimeGrid => "调整时间轴…",
+                ui::controls::LiveSetting::Palette => "调整调色板…",
+            });
+            if matches!(
+                live,
+                ui::controls::LiveSetting::KeyMap | ui::controls::LiveSetting::TimeGrid
+            ) && matches!(self.stage, PipelineStage::KeyMap | PipelineStage::Palette)
+            {
+                self.update_scrub_preview(&ctx);
+            }
+            acted = true;
+        }
+
         let checker_texture = self.checker_texture.id();
         let gpu_target_format = self.gpu_target_format;
         let mut stage_action = ui::stage_panel::Action::default();
@@ -938,9 +961,23 @@ impl eframe::App for YuetuApp {
             acted = true;
         }
 
-        if self.source.is_some() && self.settings.conversion_config() != config_before {
+        if self.source.is_some()
+            && self.settings.conversion_config() != config_before
+            && controls_action.live_setting.is_none()
+            && !self.settings_scrub_pending
+        {
             self.status = StatusMessage::info("正在更新预览…");
             self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+            acted = true;
+        }
+        if self.settings_scrub_pending && !ctx.input(|input| input.pointer.primary_down()) {
+            self.settings_scrub_pending = false;
+            if self.source.is_some() && self.settings.conversion_config() != config_before {
+                self.status = StatusMessage::info("正在更新预览…");
+                self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+            } else {
+                self.status = StatusMessage::info("就绪");
+            }
             acted = true;
         }
         self.tick_auto_conversion(&ctx);

@@ -6,6 +6,13 @@ use crate::ui::{card_with_rect, section_title, setting_row};
 use egui::{RichText, Ui};
 use yuetu_core::{KeyMap, TimeAxis};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveSetting {
+    KeyMap,
+    TimeGrid,
+    Palette,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Action {
     pub open: bool,
@@ -14,6 +21,10 @@ pub struct Action {
     pub frame: Option<usize>,
     pub rotation: Option<f32>,
     pub rotation_dragging: bool,
+    /// Conversion setting currently being dragged. The app suspends jobs for
+    /// the gesture; key-map/time-grid changes also refresh the interaction
+    /// preview without rebuilding the palette.
+    pub live_setting: Option<LiveSetting>,
     pub reset: bool,
 }
 
@@ -107,18 +118,24 @@ pub fn show(
             let (_, rect) = card_with_rect(ui, |ui| {
                 section_title(ui, "键位映射");
                 setting_row(ui, "起始键", |ui| {
-                    ui.add(
+                    let response = ui.add(
                         egui::DragValue::new(&mut settings.key_start)
                             .range(0..=127)
                             .speed(1.0),
                     );
+                    if response.dragged() {
+                        action.live_setting = Some(LiveSetting::KeyMap);
+                    }
                 });
                 setting_row(ui, "结束键", |ui| {
-                    ui.add(
+                    let response = ui.add(
                         egui::DragValue::new(&mut settings.key_end)
                             .range(0..=127)
                             .speed(1.0),
                     );
+                    if response.dragged() {
+                        action.live_setting = Some(LiveSetting::KeyMap);
+                    }
                 });
                 if settings.key_start > settings.key_end {
                     settings.key_end = settings.key_start;
@@ -217,12 +234,15 @@ pub fn show(
                 });
                 if settings.length_mode == LengthMode::Fixed {
                     setting_row(ui, "固定高度", |ui| {
-                        ui.add(
+                        let response = ui.add(
                             egui::DragValue::new(&mut settings.fixed_rows)
                                 .range(1..=65_535)
                                 .speed(1.0)
                                 .suffix(" 行"),
                         );
+                        if response.dragged() {
+                            action.live_setting = Some(LiveSetting::TimeGrid);
+                        }
                     });
                 }
 
@@ -293,11 +313,14 @@ pub fn show(
             let (_, rect) = card_with_rect(ui, |ui| {
                 section_title(ui, "调色板");
                 setting_row(ui, "颜色数", |ui| {
-                    ui.add(
+                    let response = ui.add(
                         egui::DragValue::new(&mut settings.palette_colors)
                             .range(1..=256)
                             .speed(1.0),
                     );
+                    if response.dragged() {
+                        action.live_setting = Some(LiveSetting::Palette);
+                    }
                 });
                 if let Some(preview) = preview {
                     ui.add_space(4.0);
