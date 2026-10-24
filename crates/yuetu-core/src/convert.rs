@@ -11,7 +11,8 @@ use crate::color::Color;
 use crate::error::{Error, Result};
 use crate::image::RgbaImage;
 use crate::keymap::{ColumnMapping, KeyFilter, KeyMap};
-use crate::notegen::{Note, generate_notes_with_progress};
+use crate::layout::{TimeAxis, TimeLength, resolve_time_rows};
+use crate::notegen::{Note, generate_notes_with_progress_on_grid};
 use crate::palette::Palette;
 use crate::progress::{Progress, Stage, report};
 use crate::quantize::{IndexedImage, quantize_with_progress};
@@ -53,8 +54,10 @@ pub struct ConversionConfig {
     pub resize: ResizeAlgorithm,
     /// Clockwise source rotation in degrees before resizing.
     pub rotation_deg: f32,
-    /// `0` = derive height from the source aspect ratio.
-    pub target_height: u32,
+    /// Orientation of the time axis. The key axis is the other axis.
+    pub time_axis: TimeAxis,
+    /// How the number of time rows is chosen.
+    pub time_length: TimeLength,
     /// `0` = notes ring for the whole color run.
     pub max_note_length: u32,
     /// Grid-anchored splitting instead of "flow with color" retriggering.
@@ -73,7 +76,8 @@ impl Default for ConversionConfig {
             palette_scope: PaletteScope::AllFrames,
             resize: ResizeAlgorithm::Area,
             rotation_deg: 0.0,
-            target_height: 0,
+            time_axis: TimeAxis::Vertical,
+            time_length: TimeLength::Source,
             max_note_length: 0,
             measure_from_image_start: false,
         }
@@ -92,6 +96,7 @@ pub struct ConversionSeed {
     pub resized: Option<RgbaImage>,
     pub resized_size: Option<(u32, u32)>,
     pub source_size: Option<(u32, u32)>,
+    pub time_axis: Option<TimeAxis>,
     pub indexed: Option<IndexedImage>,
 }
 
@@ -114,11 +119,19 @@ pub struct ConversionResult {
     pub keymap: KeyMap,
     pub key_start: u8,
     pub key_end: u8,
-    /// Total duration in pixel-ticks (rows of the resized image).
+    /// Time-axis orientation used to build `resized_image` and the notes.
+    pub time_axis: TimeAxis,
+    /// Total duration in time rows.
     pub duration_px: u32,
+    /// Number of time rows.
+    pub time_rows: u32,
+    /// Rotated source canvas dimensions.
     pub source_size: (u32, u32),
+    /// Oriented resized image dimensions. For horizontal time the first value
+    /// is the time extent and the second is the key count.
     pub resized_size: (u32, u32),
-    /// The image after the key-map width resize, kept for pipeline previews.
+    /// The image after the key/time-axis resize, kept for pipeline previews.
+    /// Its orientation follows `time_axis`.
     pub resized_image: RgbaImage,
     /// The nearest-palette-color index for every resized pixel.
     pub indexed_image: IndexedImage,
@@ -272,7 +285,10 @@ pub fn convert_seeded_with_options(
     timings.transform_ms += keymap_start.elapsed().as_secs_f32() * 1000.0;
 
     let can_reuse_resized = seed.is_some_and(|seed| {
-        seed.resized.is_some() && seed.source_size.is_some() && seed.resized_size.is_some()
+        seed.resized.is_some()
+            && seed.source_size.is_some()
+            && seed.resized_size.is_some()
+            && seed.time_axis == Some(config.time_axis)
     });
     let palette_available = config.manual_palette.is_some()
         || shared_palette.is_some_and(|palette| !palette.is_empty())
@@ -344,26 +360,26 @@ pub fn convert_seeded_with_options(
         }) {
         (resized.clone(), source_size, resized_size)
     } else {
-        let target_width = keymap.width();
-        if target_width == 0 {
+        let key_count = keymap.width();
+        if key_count == 0 {
             return Err(Error::Config("键映射没有产生任何列".into()));
         }
 
-        let target_height = if config.target_height > 0 {
-            config.target_height
-        } else {
-            ((source.height as f64) * (target_width as f64) / (source.width as f64))
-                .round()
-                .max(1.0) as u32
-        };
+        let time_rows = resolve_time_rows(
+            source.width,
+            source.height,
+            key_count,
+            config.time_axis,
+            config.time_length,
+        );
+        let (target_width, target_height) = config.time_axis.grid_size(key_count, time_rows);
 
-        // A pathological aspect ratio (e.g. a 1 x 100000 strip) would
-        // otherwise allocate hundreds of millions of pixels. Fail loudly
-        // instead of OOM.
-        const MAX_CONVERTED_HEIGHT: u32 = 65_535;
-        if target_height > MAX_CONVERTED_HEIGHT {
+        // A pathological custom height would otherwise allocate hundreds of
+        // millions of pixels. Fail loudly instead of OOM.
+        const MAX_CONVERTED_SIDE: u32 = 65_535;
+        if target_width > MAX_CONVERTED_SIDE || target_height > MAX_CONVERTED_SIDE {
             return Err(Error::Config(format!(
-                "缩放后高度 {target_height}px 超过上限 {MAX_CONVERTED_HEIGHT}px；请先裁剪图片"
+                "缩放后尺寸 {target_width}×{target_height}px 超过单边上限 {MAX_CONVERTED_SIDE}px；请先裁剪图片或减小时间行数"
             )));
         }
 
@@ -375,6 +391,10 @@ pub fn convert_seeded_with_options(
             (source.width, source.height),
             (target_width, target_height),
         )
+    };
+    let time_rows = match config.time_axis {
+        TimeAxis::Vertical => resized_size.1,
+        TimeAxis::Horizontal => resized_size.0,
     };
     timings.transform_ms += transform_start.elapsed().as_secs_f32() * 1000.0;
     if cancel.load(Ordering::Relaxed) {
@@ -391,12 +411,13 @@ pub fn convert_seeded_with_options(
 
     let notes_start = Instant::now();
     let (notes, note_count_by_track) = if generate_notes {
-        generate_notes_with_progress(
+        generate_notes_with_progress_on_grid(
             &indexed,
             &keymap,
             palette.len(),
             config.max_note_length,
             config.measure_from_image_start,
+            config.time_axis,
             cancel,
             progress,
         )?
@@ -416,7 +437,9 @@ pub fn convert_seeded_with_options(
         keymap,
         key_start: config.key_start,
         key_end: config.key_end,
-        duration_px: resized_size.1,
+        time_axis: config.time_axis,
+        duration_px: time_rows,
+        time_rows,
         source_size,
         resized_size,
         resized_image: resized,
@@ -475,6 +498,7 @@ mod tests {
             key_start: 60,
             key_end: 64,
             palette_colors: 1,
+            time_length: TimeLength::Square,
             manual_palette: Some(Palette::new(vec![Color::rgb(255, 0, 0)])),
             ..ConversionConfig::default()
         };
@@ -680,6 +704,7 @@ mod tests {
             resized: Some(first.resized_image.clone()),
             resized_size: Some(first.resized_size),
             source_size: Some(first.source_size),
+            time_axis: Some(first.time_axis),
             indexed: Some(first.indexed_image.clone()),
         };
         let next_config = ConversionConfig {
@@ -734,6 +759,102 @@ mod tests {
     }
 
     #[test]
+    fn source_length_preserves_time_pixels() {
+        let image = solid_red(10, 10);
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 64,
+            palette_colors: 1,
+            manual_palette: Some(Palette::new(vec![Color::rgb(255, 0, 0)])),
+            ..ConversionConfig::default()
+        };
+        let result = convert(&image, &config).unwrap();
+
+        assert_eq!(result.time_rows, 10);
+        assert_eq!(result.resized_size, (5, 10));
+    }
+
+    #[test]
+    fn fixed_height_is_exact() {
+        let image = solid_red(10, 10);
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 61,
+            palette_colors: 1,
+            time_length: TimeLength::Fixed(7),
+            manual_palette: Some(Palette::new(vec![Color::rgb(255, 0, 0)])),
+            ..ConversionConfig::default()
+        };
+        let result = convert(&image, &config).unwrap();
+
+        assert_eq!(result.time_rows, 7);
+        assert_eq!(result.resized_size, (2, 7));
+    }
+
+    #[test]
+    fn horizontal_time_maps_rows_to_keys_bottom_up() {
+        let mut image = RgbaImage::new(3, 2, Color::rgb(0, 0, 255));
+        for x in 0..3 {
+            image.set_pixel(x, 0, Color::rgb(255, 0, 0));
+        }
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 61,
+            time_axis: TimeAxis::Horizontal,
+            palette_colors: 2,
+            manual_palette: Some(Palette::new(vec![
+                Color::rgb(255, 0, 0),
+                Color::rgb(0, 0, 255),
+            ])),
+            ..ConversionConfig::default()
+        };
+        let result = convert(&image, &config).unwrap();
+
+        assert_eq!(result.time_rows, 3);
+        assert_eq!(result.resized_size, (3, 2));
+        assert_eq!(result.notes.len(), 2);
+        let bottom = result.notes.iter().find(|note| note.key == 60).unwrap();
+        let top = result.notes.iter().find(|note| note.key == 61).unwrap();
+        assert_eq!((bottom.track, bottom.start, bottom.end), (1, 0, 3));
+        assert_eq!((top.track, top.start, top.end), (0, 0, 3));
+    }
+
+    #[test]
+    fn rotation_and_time_axis_choose_the_rotated_time_extent() {
+        let image = RgbaImage::new(4, 2, Color::rgb(255, 0, 0));
+        let base = ConversionConfig {
+            key_start: 60,
+            key_end: 60,
+            palette_colors: 1,
+            rotation_deg: 90.0,
+            manual_palette: Some(Palette::new(vec![Color::rgb(255, 0, 0)])),
+            ..ConversionConfig::default()
+        };
+        let cancel = AtomicBool::new(false);
+
+        let vertical = convert_with_progress(&image, &base, None, &cancel).unwrap();
+        assert_eq!(vertical.source_size, (2, 4));
+        assert_eq!(vertical.time_axis, TimeAxis::Vertical);
+        assert_eq!(vertical.time_rows, 4);
+        assert_eq!(vertical.resized_size, (1, 4));
+
+        let horizontal = convert_with_progress(
+            &image,
+            &ConversionConfig {
+                time_axis: TimeAxis::Horizontal,
+                ..base
+            },
+            None,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(horizontal.source_size, (2, 4));
+        assert_eq!(horizontal.time_axis, TimeAxis::Horizontal);
+        assert_eq!(horizontal.time_rows, 2);
+        assert_eq!(horizontal.resized_size, (2, 1));
+    }
+
+    #[test]
     fn supplied_shared_palette_overrides_frame_clustering() {
         let image = RgbaImage::new(2, 2, Color::rgb(255, 0, 0));
         let other = RgbaImage::new(2, 2, Color::rgb(0, 0, 255));
@@ -775,6 +896,7 @@ mod tests {
 
         let result = convert_with_progress(&image, &config, None, &cancel).unwrap();
         assert_eq!(result.source_size, (2, 4));
-        assert_eq!(result.resized_size, (1, 2));
+        assert_eq!(result.time_rows, 4);
+        assert_eq!(result.resized_size, (1, 4));
     }
 }

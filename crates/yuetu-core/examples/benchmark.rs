@@ -53,6 +53,7 @@ fn main() {
         resized: Some(first.resized_image.clone()),
         resized_size: Some(first.resized_size),
         source_size: Some(first.source_size),
+        time_axis: Some(first.time_axis),
         indexed: Some(first.indexed_image.clone()),
     };
     let notes_config = ConversionConfig {

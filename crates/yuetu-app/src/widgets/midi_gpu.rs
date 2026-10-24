@@ -83,8 +83,10 @@ struct MidiUniform {
     viewport_size: [f32; 2],
     content_left: f32,
     content_bottom: f32,
-    scale: f32,
-    _pad: f32,
+    scale_x: f32,
+    scale_y: f32,
+    horizontal: f32,
+    _pad: [f32; 3],
 }
 
 pub struct MidiGpuCallback {
@@ -94,11 +96,14 @@ pub struct MidiGpuCallback {
 }
 
 impl MidiGpuCallback {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         data: Arc<MidiGpuData>,
         viewport: egui::Rect,
         content: egui::Rect,
-        scale: f32,
+        scale_x: f32,
+        scale_y: f32,
+        horizontal: bool,
         target_format: wgpu::TextureFormat,
     ) -> Self {
         Self {
@@ -108,8 +113,10 @@ impl MidiGpuCallback {
                 viewport_size: [viewport.width().max(1.0), viewport.height().max(1.0)],
                 content_left: content.left(),
                 content_bottom: content.bottom(),
-                scale,
-                _pad: 0.0,
+                scale_x,
+                scale_y,
+                horizontal: if horizontal { 1.0 } else { 0.0 },
+                _pad: [0.0; 3],
             },
             target_format,
         }

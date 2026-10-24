@@ -1,9 +1,10 @@
 use crate::jobs::ProgressView;
-use crate::settings::Settings;
-use crate::state::{CoordinateOrigin, PipelineStage, Preview, SourceImage, StageStop};
+use crate::settings::{LengthMode, Settings};
+use crate::state::{PipelineStage, Preview, SourceImage, StageStop};
 use crate::theme;
 use crate::ui::{card_with_rect, section_title, setting_row};
 use egui::{RichText, Ui};
+use yuetu_core::{KeyMap, TimeAxis};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Action {
@@ -25,7 +26,6 @@ pub struct Output {
 pub fn show(
     ui: &mut Ui,
     settings: &mut Settings,
-    coordinate_origin: &mut CoordinateOrigin,
     source: Option<&SourceImage>,
     preview: Option<&Preview>,
     is_running: bool,
@@ -34,6 +34,7 @@ pub fn show(
 ) -> Output {
     let mut action = Action::default();
     let mut stops = Vec::with_capacity(4);
+    let source_size = source.map(|source| source.display_size).unwrap_or((1, 1));
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -96,23 +97,6 @@ pub fn show(
                 } else {
                     ui.label("尚未打开图片");
                 }
-
-                setting_row(ui, "坐标原点", |ui| {
-                    egui::ComboBox::from_id_salt("coordinate_origin")
-                        .selected_text(coordinate_origin.label())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                coordinate_origin,
-                                CoordinateOrigin::TopLeft,
-                                CoordinateOrigin::TopLeft.label(),
-                            );
-                            ui.selectable_value(
-                                coordinate_origin,
-                                CoordinateOrigin::BottomLeft,
-                                CoordinateOrigin::BottomLeft.label(),
-                            );
-                        });
-                });
             });
             stops.push(StageStop {
                 stage: PipelineStage::Source,
@@ -162,7 +146,7 @@ pub fn show(
                         });
                 });
 
-                setting_row(ui, "列映射", |ui| {
+                setting_row(ui, "键位填充", |ui| {
                     egui::ComboBox::from_id_salt("column_mapping")
                         .selected_text(settings.column_mapping.label())
                         .show_ui(ui, |ui| {
@@ -178,6 +162,110 @@ pub fn show(
                             );
                         });
                 });
+
+                setting_row(ui, "时间方向", |ui| {
+                    egui::ComboBox::from_id_salt("time_axis")
+                        .selected_text(settings.time_axis.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut settings.time_axis,
+                                TimeAxis::Vertical,
+                                TimeAxis::Vertical.label(),
+                            );
+                            ui.selectable_value(
+                                &mut settings.time_axis,
+                                TimeAxis::Horizontal,
+                                TimeAxis::Horizontal.label(),
+                            );
+                        });
+                });
+
+                let key_count = KeyMap::build(
+                    settings.key_start.min(settings.key_end),
+                    settings.key_end.max(settings.key_start),
+                    settings.key_filter,
+                    settings.column_mapping,
+                )
+                .map(|keymap| keymap.width())
+                .unwrap_or(0);
+                let current_rows = settings.time_rows(source_size);
+
+                setting_row(ui, "长度", |ui| {
+                    let previous = settings.length_mode;
+                    egui::ComboBox::from_id_salt("time_length_mode")
+                        .selected_text(settings.length_mode.label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut settings.length_mode,
+                                LengthMode::Source,
+                                LengthMode::Source.label(),
+                            );
+                            ui.selectable_value(
+                                &mut settings.length_mode,
+                                LengthMode::Square,
+                                LengthMode::Square.label(),
+                            );
+                            ui.selectable_value(
+                                &mut settings.length_mode,
+                                LengthMode::Fixed,
+                                LengthMode::Fixed.label(),
+                            );
+                        });
+                    if settings.length_mode == LengthMode::Fixed && previous != LengthMode::Fixed {
+                        settings.fixed_rows = current_rows.max(1);
+                    }
+                });
+                if settings.length_mode == LengthMode::Fixed {
+                    setting_row(ui, "固定高度", |ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut settings.fixed_rows)
+                                .range(1..=65_535)
+                                .speed(1.0)
+                                .suffix(" 行"),
+                        );
+                    });
+                }
+
+                setting_row(ui, "PPQ", |ui| {
+                    ui.add(egui::DragValue::new(&mut settings.ppq).range(1..=0x7FFF));
+                });
+                setting_row(ui, "每行 Ticks", |ui| {
+                    ui.add(egui::DragValue::new(&mut settings.ticks_per_pixel).range(1..=0xFFFF));
+                });
+                setting_row(ui, "拍号", |ui| {
+                    ui.horizontal(|ui| {
+                        // The row layout is right-to-left, so add the rightmost
+                        // widget first to keep the visual order "numerator / denominator".
+                        egui::ComboBox::from_id_salt("time_signature_denominator")
+                            .selected_text(settings.time_signature.denominator.to_string())
+                            .show_ui(ui, |ui| {
+                                for denominator in [1, 2, 4, 8, 16, 32] {
+                                    ui.selectable_value(
+                                        &mut settings.time_signature.denominator,
+                                        denominator,
+                                        denominator.to_string(),
+                                    );
+                                }
+                            });
+                        ui.label("/");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.time_signature.numerator)
+                                .range(1..=32)
+                                .speed(1.0),
+                        );
+                    });
+                });
+
+                settings.time_signature = settings.valid_time_signature();
+                let rows = settings.time_rows(source_size);
+                let total_ticks = settings.total_ticks(source_size);
+                let bars = settings.bar_count(source_size);
+                ui.label(
+                    RichText::new(format!(
+                        "{key_count} 键 × {rows} 行 · {total_ticks} ticks · {bars:.2} 小节"
+                    ))
+                    .color(theme::muted(ui)),
+                );
 
                 setting_row(ui, "缩放算法", |ui| {
                     egui::ComboBox::from_id_salt("resize_algorithm")
@@ -244,7 +332,7 @@ pub fn show(
                         } else {
                             "按持有时长"
                         };
-                        egui::ComboBox::from_id_salt("length_mode")
+                        egui::ComboBox::from_id_salt("note_length_mode")
                             .selected_text(selected)
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
@@ -261,12 +349,6 @@ pub fn show(
                     });
                 }
 
-                setting_row(ui, "PPQ", |ui| {
-                    ui.add(egui::DragValue::new(&mut settings.ppq).range(1..=0x7FFF));
-                });
-                setting_row(ui, "Ticks / px", |ui| {
-                    ui.add(egui::DragValue::new(&mut settings.ticks_per_pixel).range(1..=0xFFFF));
-                });
                 setting_row(ui, "BPM", |ui| {
                     ui.add(egui::DragValue::new(&mut settings.bpm).range(1..=1000));
                 });

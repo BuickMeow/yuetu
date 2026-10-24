@@ -17,12 +17,13 @@ pub fn show(
     ui: &mut Ui,
     view: &mut View2D,
     texture: egui::TextureId,
-    content_size: (u32, u32),
+    display_size: (u32, u32),
+    grid_size: (u32, u32),
     checkerboard: bool,
     checker_texture: egui::TextureId,
     coordinate_origin: CoordinateOrigin,
 ) -> Option<RasterHover> {
-    let size = egui::vec2(content_size.0.max(1) as f32, content_size.1.max(1) as f32);
+    let size = egui::vec2(display_size.0.max(1) as f32, display_size.1.max(1) as f32);
     let interaction = view.interact(ui, size, CursorIcon::Crosshair);
     let painter = ui.painter_at(interaction.viewport);
 
@@ -44,17 +45,19 @@ pub fn show(
     );
 
     let hovered = interaction.hover_uv().map(|uv| RasterHover {
-        x: ((uv.x * content_size.0 as f32).floor() as u32).min(content_size.0.saturating_sub(1)),
-        y: ((uv.y * content_size.1 as f32).floor() as u32).min(content_size.1.saturating_sub(1)),
+        x: ((uv.x * grid_size.0 as f32).floor() as u32).min(grid_size.0.saturating_sub(1)),
+        y: ((uv.y * grid_size.1 as f32).floor() as u32).min(grid_size.1.saturating_sub(1)),
     });
 
     if let Some(hover) = hovered {
-        if interaction.scale >= 4.0 {
+        let cell_width = interaction.content_rect.width() / grid_size.0.max(1) as f32;
+        let cell_height = interaction.content_rect.height() / grid_size.1.max(1) as f32;
+        if cell_width >= 4.0 && cell_height >= 4.0 {
             let min = egui::pos2(
-                interaction.content_rect.left() + hover.x as f32 * interaction.scale,
-                interaction.content_rect.top() + hover.y as f32 * interaction.scale,
+                interaction.content_rect.left() + hover.x as f32 * cell_width,
+                interaction.content_rect.top() + hover.y as f32 * cell_height,
             );
-            let rect = Rect::from_min_size(min, egui::vec2(interaction.scale, interaction.scale));
+            let rect = Rect::from_min_size(min, egui::vec2(cell_width, cell_height));
             painter.rect_stroke(
                 rect,
                 0.0,
@@ -64,7 +67,7 @@ pub fn show(
         }
     }
 
-    draw_rulers(ui, &painter, &interaction, content_size, coordinate_origin);
+    draw_rulers(ui, &painter, &interaction, display_size, coordinate_origin);
     hovered
 }
 

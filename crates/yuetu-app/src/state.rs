@@ -7,8 +7,8 @@ use std::time::Instant;
 use yuetu_core::resize::resize;
 use yuetu_core::{
     Color, ConversionConfig, ConversionResult, ImageSequence, IndexedImage, KeyMap, Palette,
-    ResizeAlgorithm, RgbaImage, generate_notes, load_image_sequence, normalize_degrees, quantize,
-    rotate_image, rotated_dimensions,
+    ResizeAlgorithm, RgbaImage, TimeAxis, generate_notes_on_grid, load_image_sequence,
+    normalize_degrees, quantize, resolve_time_rows, rotate_image, rotated_dimensions,
 };
 
 use crate::widgets::midi_gpu::MidiGpuData;
@@ -378,13 +378,6 @@ pub enum CoordinateOrigin {
 }
 
 impl CoordinateOrigin {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::TopLeft => "左上角",
-            Self::BottomLeft => "左下角",
-        }
-    }
-
     /// Convert a top-left pixel row into the displayed row for this origin.
     pub fn display_y(self, y: u32, height: u32) -> u32 {
         match self {
@@ -412,6 +405,7 @@ pub enum StageHover {
         color: Color,
         key: Option<u8>,
         height: u32,
+        time_axis: TimeAxis,
     },
     Palette {
         index: i32,
@@ -424,6 +418,7 @@ pub enum StageHover {
 }
 
 pub struct StageSnapshot {
+    pub time_axis: TimeAxis,
     pub resized_image: RgbaImage,
     pub resized_texture: TextureHandle,
     pub resized_has_transparency: bool,
@@ -497,12 +492,13 @@ impl Preview {
             return Ok(());
         }
         let started = Instant::now();
-        let (notes, note_count_by_track) = generate_notes(
+        let (notes, note_count_by_track) = generate_notes_on_grid(
             &self.result.indexed_image,
             &self.result.keymap,
             self.result.palette.len(),
             config.max_note_length,
             config.measure_from_image_start,
+            self.result.time_axis,
         );
         self.result.notes = notes;
         self.result.note_count_by_track = note_count_by_track;
@@ -530,17 +526,16 @@ impl Preview {
             config.key_filter,
             config.column_mapping,
         )?;
-        let target_width = keymap.width().max(1);
-        let target_height = if config.target_height > 0 {
-            config.target_height
-        } else {
-            ((full_source_size.1 as f64) * (target_width as f64)
-                / (full_source_size.0.max(1) as f64))
-                .round()
-                .max(1.0) as u32
-        };
-
-        let resized = resize(image, target_width, target_height, config.resize)?;
+        let key_count = keymap.width().max(1);
+        let time_rows = resolve_time_rows(
+            full_source_size.0,
+            full_source_size.1,
+            key_count,
+            config.time_axis,
+            config.time_length,
+        );
+        let target_size = config.time_axis.grid_size(key_count, time_rows);
+        let resized = resize(image, target_size.0, target_size.1, config.resize)?;
         let indexed = quantize(&resized, palette);
         let resized_name = format!("stage:resized:interaction:{}", self.source_revision);
         let resized_texture = upload_texture(ctx, &resized_name, &resized)?;
@@ -549,10 +544,11 @@ impl Preview {
         let indexed_texture = upload_texture(ctx, &indexed_name, &indexed_rgba)?;
 
         self.interaction = Some(StageSnapshot {
+            time_axis: config.time_axis,
             resized_has_transparency: image_has_transparency(&resized),
             resized_image: resized,
             resized_texture,
-            resized_size: (target_width, target_height),
+            resized_size: target_size,
             indexed_has_transparency: indexed.indices.iter().any(|&index| index < 0),
             indexed_image: indexed,
             indexed_texture,

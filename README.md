@@ -50,7 +50,7 @@ crates/
     resize.rs          #   Area / Nearest
     palette.rs         #   自动调色板 + 最近色
     quantize.rs        #   像素 → 调色板索引
-    keymap.rs          #   键过滤 + 列映射
+    keymap.rs          #   键过滤 + 键位分布
     notegen.rs         #   唯一的音符生成算法（纯函数）
     convert.rs         #   流水线编排 + ConversionResult
     midi.rs            #   Format-1 MIDI 写出

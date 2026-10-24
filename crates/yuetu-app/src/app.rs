@@ -89,7 +89,7 @@ impl YuetuApp {
             stage: PipelineStage::Source,
             stage_stops: Vec::new(),
             stage_hover: None,
-            coordinate_origin: CoordinateOrigin::TopLeft,
+            coordinate_origin: CoordinateOrigin::BottomLeft,
             frame_strip_last_frame: 0,
             frame_strip_mode: ui::frame_strip::FrameStripMode::default(),
             frame_scrub_pending: false,
@@ -268,6 +268,7 @@ impl YuetuApp {
             seed.resized = Some(preview.result.resized_image.clone());
             seed.resized_size = Some(preview.result.resized_size);
             seed.source_size = Some(preview.result.source_size);
+            seed.time_axis = Some(preview.result.time_axis);
             if same_palette {
                 seed.indexed = Some(preview.result.indexed_image.clone());
             }
@@ -426,7 +427,13 @@ impl YuetuApp {
             return false;
         }
         match preview.ensure_notes(&config) {
-            Ok(()) => true,
+            Ok(()) => {
+                let notes = preview.result.note_count();
+                let tracks = preview.result.track_count();
+                self.status =
+                    StatusMessage::success(format!("音符已生成：{notes} 音符 · {tracks} 音轨"));
+                true
+            }
             Err(error) => {
                 self.status = StatusMessage::error(format!("生成音符失败：{error}"));
                 false
@@ -724,7 +731,6 @@ impl eframe::App for YuetuApp {
                 ui::controls::show(
                     ui,
                     &mut self.settings,
-                    &mut self.coordinate_origin,
                     self.source.as_ref(),
                     self.preview.as_ref(),
                     self.jobs.is_running(),
@@ -792,6 +798,7 @@ impl eframe::App for YuetuApp {
                     self.coordinate_origin,
                     source,
                     preview,
+                    &self.settings.midi_config(),
                     view,
                     &mut self.stage_hover,
                     updating,
@@ -866,7 +873,7 @@ impl eframe::App for YuetuApp {
         }
         if controls_action.reset {
             self.settings = Settings::default();
-            self.coordinate_origin = CoordinateOrigin::TopLeft;
+            self.coordinate_origin = CoordinateOrigin::BottomLeft;
             if let Some(source) = self.source.as_mut() {
                 match source.set_rotation(&ctx, 0.0) {
                     Ok(true) => {
@@ -952,5 +959,6 @@ fn transform_config_eq(a: &ConversionConfig, b: &ConversionConfig) -> bool {
     keymap_config_eq(a, b)
         && a.resize == b.resize
         && a.rotation_deg == b.rotation_deg
-        && a.target_height == b.target_height
+        && a.time_axis == b.time_axis
+        && a.time_length == b.time_length
 }

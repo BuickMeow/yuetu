@@ -1,6 +1,6 @@
 use egui::{RichText, Ui};
 use egui_extras::{Size, StripBuilder};
-use yuetu_core::Color;
+use yuetu_core::{Color, MidiOutputConfig, TimeAxis};
 
 use crate::jobs::ProgressView;
 use crate::state::{CoordinateOrigin, PipelineStage, Preview, SourceImage, StageHover};
@@ -19,6 +19,7 @@ pub fn show(
     coordinate_origin: CoordinateOrigin,
     source: Option<&SourceImage>,
     preview: Option<&Preview>,
+    midi_config: &MidiOutputConfig,
     view: &mut View2D,
     hover: &mut Option<StageHover>,
     updating: bool,
@@ -41,6 +42,7 @@ pub fn show(
                 view,
                 source.texture.id(),
                 source.display_size,
+                source.display_size,
                 source.has_transparency,
                 checker_texture,
                 coordinate_origin,
@@ -60,11 +62,12 @@ pub fn show(
 
             match stage {
                 PipelineStage::KeyMap => {
-                    let (texture, size, transparency, image, keymap) =
+                    let (texture, size, time_axis, transparency, image, keymap) =
                         if let Some(stage) = preview.interaction.as_ref() {
                             (
                                 stage.resized_texture.id(),
                                 stage.resized_size,
+                                stage.time_axis,
                                 stage.resized_has_transparency,
                                 &stage.resized_image,
                                 &stage.keymap,
@@ -73,6 +76,7 @@ pub fn show(
                             (
                                 preview.resized_texture.id(),
                                 preview.result.resized_size,
+                                preview.result.time_axis,
                                 preview.resized_has_transparency,
                                 &preview.result.resized_image,
                                 &preview.result.keymap,
@@ -82,16 +86,26 @@ pub fn show(
                         ui,
                         view,
                         texture,
+                        source.display_size,
                         size,
                         transparency,
                         checker_texture,
                         coordinate_origin,
                     );
-                    *hover = hovered.map(|pixel| StageHover::KeyMap {
-                        pos: (pixel.x, pixel.y),
-                        color: image.pixel(pixel.x, pixel.y).unwrap_or(Color::TRANSPARENT),
-                        key: keymap.key_at(pixel.x),
-                        height: size.1,
+                    *hover = hovered.map(|pixel| {
+                        let key_position = match time_axis {
+                            TimeAxis::Vertical => pixel.x,
+                            TimeAxis::Horizontal => {
+                                size.1.saturating_sub(1).saturating_sub(pixel.y)
+                            }
+                        };
+                        StageHover::KeyMap {
+                            pos: (pixel.x, pixel.y),
+                            color: image.pixel(pixel.x, pixel.y).unwrap_or(Color::TRANSPARENT),
+                            key: keymap.key_at(key_position),
+                            height: size.1,
+                            time_axis,
+                        }
                     });
                 }
                 PipelineStage::Palette => {
@@ -120,6 +134,7 @@ pub fn show(
                         ui,
                         view,
                         texture,
+                        source.display_size,
                         size,
                         transparency,
                         checker_texture,
@@ -143,6 +158,7 @@ pub fn show(
                     let output = midi_preview::show(
                         ui,
                         &preview.result,
+                        midi_config,
                         &preview.midi_gpu,
                         view,
                         gpu_target_format,

@@ -3,14 +3,20 @@
 //! This is a pure function: `IndexedImage + KeyMap` in, notes out. It knows
 //! nothing about palettes (only track indices), files, timing units, or UI.
 //!
-//! Rows are scanned **bottom to top**. Each row step advances time by one
-//! pixel-tick. Whenever a column changes color (or a note-length limit forces
-//! a retrigger), the previous note is closed and the new one is opened.
+//! Time advances along one image axis and keys are read along the other. Both
+//! orientations use a bottom-left origin:
+//!
+//! * vertical time: keys left-to-right, time bottom-to-top;
+//! * horizontal time: time left-to-right, keys bottom-to-top.
+//!
+//! Whenever a key changes color (or a note-length limit forces a retrigger),
+//! the previous note is closed and the new one is opened.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{Error, Result};
 use crate::keymap::KeyMap;
+use crate::layout::TimeAxis;
 use crate::progress::{Progress, Stage, report};
 use crate::quantize::{IndexedImage, TRANSPARENT_ID};
 
@@ -45,12 +51,32 @@ pub fn generate_notes(
     max_note_length: u32,
     measure_from_start: bool,
 ) -> (Vec<Note>, Vec<usize>) {
-    generate_notes_with_progress(
+    generate_notes_on_grid(
         indexed,
         keymap,
         track_count,
         max_note_length,
         measure_from_start,
+        TimeAxis::Vertical,
+    )
+}
+
+/// Generate notes with an explicit time-axis orientation.
+pub fn generate_notes_on_grid(
+    indexed: &IndexedImage,
+    keymap: &KeyMap,
+    track_count: usize,
+    max_note_length: u32,
+    measure_from_start: bool,
+    time_axis: TimeAxis,
+) -> (Vec<Note>, Vec<usize>) {
+    generate_notes_with_progress_on_grid(
+        indexed,
+        keymap,
+        track_count,
+        max_note_length,
+        measure_from_start,
+        time_axis,
         &AtomicBool::new(false),
         None,
     )
@@ -68,51 +94,84 @@ pub fn generate_notes_with_progress(
     cancel: &AtomicBool,
     progress: Option<&dyn Progress>,
 ) -> Result<(Vec<Note>, Vec<usize>)> {
+    generate_notes_with_progress_on_grid(
+        indexed,
+        keymap,
+        track_count,
+        max_note_length,
+        measure_from_start,
+        TimeAxis::Vertical,
+        cancel,
+        progress,
+    )
+}
+
+/// Cancellable, progress-reporting variant with an explicit time axis.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_notes_with_progress_on_grid(
+    indexed: &IndexedImage,
+    keymap: &KeyMap,
+    track_count: usize,
+    max_note_length: u32,
+    measure_from_start: bool,
+    time_axis: TimeAxis,
+    cancel: &AtomicBool,
+    progress: Option<&dyn Progress>,
+) -> Result<(Vec<Note>, Vec<usize>)> {
     report(progress, Stage::Notes, 0.0);
 
     let width = indexed.width as usize;
     let mut notes = Vec::new();
     let mut count_by_track = vec![0usize; track_count];
 
-    // Resolve the key map once. Silent columns are skipped entirely instead of
-    // paying a `key_at` call for every pixel row.
-    let mut columns: Vec<(usize, u8)> = Vec::with_capacity(width);
-    for column in 0..width {
-        if let Some(key) = keymap.key_at(column as u32) {
-            columns.push((column, key));
+    let (time_steps, key_extent) = match time_axis {
+        TimeAxis::Vertical => (indexed.height, indexed.width),
+        TimeAxis::Horizontal => (indexed.width, indexed.height),
+    };
+
+    // Resolve the key map once. Silent positions are skipped entirely instead
+    // of paying a `key_at` call for every time step.
+    let mut keys: Vec<(u32, u8)> = Vec::with_capacity(key_extent as usize);
+    for position in 0..key_extent {
+        if let Some(key) = keymap.key_at(position) {
+            keys.push((position, key));
         }
     }
 
-    let mut column_color = vec![TRANSPARENT_ID; columns.len()];
-    let mut column_start = vec![0u32; columns.len()];
-    let mut column_last_on = vec![0u32; columns.len()];
+    let mut key_color = vec![TRANSPARENT_ID; keys.len()];
+    let mut key_start = vec![0u32; keys.len()];
+    let mut key_last_on = vec![0u32; keys.len()];
 
-    let height = indexed.height;
     let mut time = 0u32;
 
-    for row in (0..height).rev() {
+    for step in 0..time_steps {
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
-        let row_start = row as usize * width;
         let grid_retrigger = max_note_length > 0
             && measure_from_start
             && time > 0
             && time.is_multiple_of(max_note_length);
 
-        for (position, &(column, key)) in columns.iter().enumerate() {
-            let mut new_color = indexed.indices[row_start + column];
+        for (slot, &(position, key)) in keys.iter().enumerate() {
+            let index = match time_axis {
+                TimeAxis::Vertical => (time_steps - 1 - step) as usize * width + position as usize,
+                TimeAxis::Horizontal => {
+                    (key_extent - 1 - position) as usize * width + step as usize
+                }
+            };
+            let mut new_color = indexed.indices[index];
             if new_color < 0 || new_color as usize >= track_count {
                 new_color = TRANSPARENT_ID;
             }
 
-            let old_color = column_color[position];
+            let old_color = key_color[slot];
             let force_retrigger = max_note_length > 0
                 && old_color >= 0
                 && if measure_from_start {
                     grid_retrigger
                 } else {
-                    time.saturating_sub(column_last_on[position]) >= max_note_length
+                    time.saturating_sub(key_last_on[slot]) >= max_note_length
                 };
 
             if new_color != old_color || force_retrigger {
@@ -123,34 +182,34 @@ pub fn generate_notes_with_progress(
                         Note {
                             key,
                             track: old_color as u16,
-                            start: column_start[position],
+                            start: key_start[slot],
                             end: time,
                         },
                     );
                 }
 
-                column_color[position] = new_color;
+                key_color[slot] = new_color;
                 if new_color >= 0 {
-                    column_start[position] = time;
-                    column_last_on[position] = time;
+                    key_start[slot] = time;
+                    key_last_on[slot] = time;
                 }
             }
         }
 
         time = time.saturating_add(1);
 
-        if row % 16 == 0 && height > 0 {
+        if step % 16 == 0 && time_steps > 0 {
             report(
                 progress,
                 Stage::Notes,
-                (height - row) as f32 / height as f32,
+                (step + 1) as f32 / time_steps as f32,
             );
         }
     }
 
-    // Close every note still ringing at the top edge.
-    for (position, &(_, key)) in columns.iter().enumerate() {
-        let color = column_color[position];
+    // Close every note still ringing at the end of the time axis.
+    for (slot, &(_, key)) in keys.iter().enumerate() {
+        let color = key_color[slot];
         if color < 0 {
             continue;
         }
@@ -160,7 +219,7 @@ pub fn generate_notes_with_progress(
             Note {
                 key,
                 track: color as u16,
-                start: column_start[position],
+                start: key_start[slot],
                 end: time,
             },
         );

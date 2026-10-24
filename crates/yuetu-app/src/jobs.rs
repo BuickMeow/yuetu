@@ -111,6 +111,7 @@ impl JobRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &mut self,
         image: Arc<RgbaImage>,

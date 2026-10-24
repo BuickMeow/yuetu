@@ -56,8 +56,8 @@ ImageSequence {
 
 ```rust
 Palette { colors: Vec<Color> }
-KeyMap { columns: Vec<Option<u8>> }   // 列号 → MIDI 键（None = 静音列）
-IndexedImage { width, height, indices: Vec<i32> } // -2 = 静音
+KeyMap { columns: Vec<Option<u8>> }   // 键轴位置 → MIDI 键（None = 静音）
+IndexedImage { width, height, indices: Vec<i32> } // -2 = 静音；宽高按时间方向旋转
 ```
 
 `IndexedImage` 是前处理与核心算法之间唯一的契约。核心算法不关心：
@@ -72,14 +72,18 @@ IndexedImage { width, height, indices: Vec<i32> } // -2 = 静音
 
 ```rust
 ConversionResult {
-    notes: Vec<Note>,          // key, track, start, end（单位：pixel tick）
+    notes: Vec<Note>,          // key, track, start, end（单位：时间行）
     palette: Palette,
     keymap: KeyMap,
-    duration_px: u32,
-    source_size / resized_size,
+    time_axis: TimeAxis,       // 纵向时间 / 横向时间
+    time_rows: u32,            // 时间轴行数，与 MIDI PPQ 无关
+    duration_px: u32,          // = time_rows，保留旧字段名
+    source_size,               // 旋转展开后的源画布
+    resized_size,              // 按时间方向旋转后的输出尺寸
     resized_image: RgbaImage,  // 键位映射阶段的图片
     indexed_image: IndexedImage, // 调色板阶段的索引色图
     note_count_by_track,
+    notes_generated,
 }
 ```
 
@@ -101,7 +105,8 @@ validate config
   → KeyMap::build
   → rotate(rotation_deg)
   → Palette::from_frames（动图所有帧加权 / 手动调色板）
-  → resize(width = keymap.width, height = aspect)
+  → resolve_time_rows(source, time_axis, time_length)
+  → resize(key axis = keymap.width, time axis = time_rows)
   → quantize
   → generate_notes
   → ConversionResult
@@ -109,15 +114,16 @@ validate config
 
 真正的核心算法只有 `notegen::generate_notes`：
 
-- 从图片底部向上扫描；
-- 每一行推进 1 个 pixel-tick；
-- 每一列的颜色变化时，关闭旧音符、打开新音符；
+- 纵向时间：从左到右扫描键轴，从下到上推进时间；
+- 横向时间：从下到上扫描键轴，从左到右推进时间；
+- 每个时间行推进 1 个 pixel-tick；
+- 每个键位位置的颜色变化时，关闭旧音符、打开新音符；
 - 支持“持有时长重触发”和“固定网格切分”两种长度限制；
 - 纯函数，输入输出都是数据，可直接单元测试。
 
 音符扫描中只遍历键映射真正映射到的列，固定网格的重触发条件每行只计算一次，输出使用非稳定排序；这些改动不改变结果，只减少每像素的重复工作。
 
-本机合成基准（128 列、163 行、16 色）中，缩放约 1.9 ms、量化约 0.23 ms、音符生成约 0.12 ms，而 30 帧 512×512 的全帧调色板聚类约 18 ms。动画切帧时的主要浪费来自重复聚类，不在音符生成本身；共享色板缓存解决的是这部分。
+本机合成基准（128 列、512 行、16 色）中，主要耗时仍来自 30 帧 512×512 的全帧调色板聚类；缩放、量化和音符生成都远小于调色板。动画切帧时的主要浪费来自重复聚类，不在音符生成本身；共享色板缓存解决的是这部分。
 
 以后加入并行量化、取消、进度，不会改变这个函数的签名。
 
@@ -136,7 +142,7 @@ preview: Option<Preview>      // ConversionResult + 配置 + 阶段纹理
 settings: Settings            // UI 参数（含旋转、颜色数）
 stage: PipelineStage          // 当前流水线阶段
 stage_stops: Vec<StageStop>   // 左侧卡片中心，供图标滑块吸附
-coordinate_origin             // 标尺/悬停坐标原点：左上角或左下角
+coordinate_origin             // 固定左下角，暂不提供切换
 frame_strip_last_frame        // 帧条上次选中的帧，用于外部选帧时自动滚入视野
 source/key/palette/midi_view  // 每个阶段独立的 View2D
 status / hover                // 一帧内的展示信息
@@ -213,16 +219,39 @@ UI: poll_jobs() → 状态栏 + 进度条 + 新 Preview
 - 双击：适配窗口；
 - 状态栏百分比是绝对缩放（100% = 一个图片像素对应一个逻辑点），可拖动编辑；旁边是一个循环缩放按钮：适应（完整显示）→ 填充（覆盖视口并裁剪）→ 100%。
 
-MIDI 阶段的坐标单位是“列 × pixel-tick”，不是屏幕像素；因此窗口缩放、面板拖拽都不会改变数据坐标。
+MIDI 阶段的坐标单位是“键位 × 时间行”，不是屏幕像素；显示区域使用旋转后源画布的比例，因此窗口缩放、面板拖拽都不会改变数据坐标，也不会把图案拉长。
 
 ### 5.6 流水线阶段与轨道
 
 四个阶段由左侧卡片定义：
 
-1. `源图`：原始图像 + Photoshop 风格像素标尺；旋转输入可无限循环（显示 0–360°，内部连续累加），标尺原点可切到左下角；
-2. `键位映射`：按 `KeyMap::width()` 缩放后的图片，保持宽高比；
-3. `调色板`：`IndexedImage` 按调色板还原成索引色图，悬停显示索引和色号；动图始终使用所有帧的共享色板；
-4. `MIDI 生成`：钢琴卷帘音符；音符长度/切分设置也归入这一阶段。
+1. `源图`：原始图像 + Photoshop 风格像素标尺；旋转输入可无限循环（显示 0–360°，内部连续累加），坐标原点固定左下角；
+2. `键位映射`：键轴缩放到 `KeyMap::width()`，时间轴长度按“原图长度 / 正方形像素 / 固定高度”解析；输出可以是 K×R，也可以是 R×K；
+3. `调色板`：`IndexedImage` 按调色板还原成索引色图，方向与键位映射一致；动图始终使用所有帧的共享色板；
+4. `MIDI 生成`：钢琴卷帘音符，方向跟随时间轴；音符长度/切分和 MIDI 时间设置归入这一阶段。
+
+时间方向与长度：
+
+```text
+纵向时间：X = 键（左→右），Y = 时间（下→上），输出 K × R
+横向时间：X = 时间（左→右），Y = 键（下→上），输出 R × K
+
+原图长度：   R = 旋转后画布沿时间轴的像素数
+正方形像素： R = round(时间像素数 × K / 键轴像素数)
+固定高度：   R = 用户输入行数
+```
+
+所有长度模式只决定时间行数；`ticks/row`、PPQ、拍号不改变图片行数。`原图长度` 保留一个源时间像素对应一个输出时间行，允许非正方形像素。键位映射、调色板和 MIDI 预览都按旋转后源画布的 `Wr × Hr` 显示，也就是把 `K × R` 纹理拉伸到源比例，避免图案被压扁或拉长。
+
+MIDI 输出的小节线位置由 `PPQ + 拍号 + ticks/row` 决定：
+
+```text
+bar_ticks = numerator × (4 × PPQ / denominator)
+总 MIDI ticks = time_rows × ticks/row
+bar_row = bar_ticks / ticks/row
+```
+
+拍号默认 4/4，并写入 Standard MIDI File 的 Time Signature Meta 事件。改 PPQ/拍号/ticks/row 只更新 MIDI 导出和预览小节线，不触发图片重新转换。
 
 标尺左上角是明确的 corner cell（横/纵标尺交汇格），不是漏画；它的右边和下边与标尺分隔线相连。坐标原点为左下角时，纵轴标签按 `height - 1 - row` 显示，底部像素行为 0，顶部为 `height - 1`；状态栏悬停坐标同步使用同一转换。
 
@@ -252,9 +281,12 @@ MIDI 阶段的坐标单位是“列 × pixel-tick”，不是屏幕像素；因�
 ```text
 SourceKey    = source_generation + frame_index
 PaletteKey   = source_sequence_generation + palette_colors
-TransformKey = SourceKey + keymap + rotation + target_height + resize
+TransformKey = SourceKey + keymap + rotation + time_axis + time_length + resize
 IndexedKey   = TransformKey + PaletteKey
 NotesKey     = IndexedKey + note settings
+
+MIDI 时间键（不参与图片缓存）：
+  PPQ + 拍号 + ticks/row + BPM + start_offset
 ```
 
 分辨率分三层：
@@ -290,7 +322,7 @@ eframe::Renderer::Wgpu
 
 - 图片显示本来就是一个纹理 quad，GPU 采样；不需要每帧 CPU 重建像素。
 - 棋盘格改为一张可重复的 2×2 灰度纹理，通过 `TextureWrapMode::Repeat` 和单个 Mesh quad 绘制；不再逐格生成 Shape。
-- MIDI 音符实例在 `ConversionResult` 变化时构建并上传一次；拖动/缩放只更新 uniform，GPU 每帧一次 instanced draw。实例数据包含列、start/end、颜色，顶点 shader 直接生成 note quad。
+- MIDI 音符实例在 `ConversionResult` 变化时构建并上传一次；拖动/缩放只更新 uniform，GPU 每帧一次 instanced draw。实例数据包含键位位置、start/end、颜色；uniform 提供 X/Y 两个尺度和时间方向，顶点 shader 直接生成对应方向的 note quad。
 
 大图高倍缩放曾经的主要卡顿源是棋盘背景逐格生成；现在所有阶段纹理和音符都在 GPU 批量绘制。5000×5000 约 1900% 缩放实测可交互。`ConversionResult` 契约不变，替换范围仍被限制在 phase widgets 内。
 
@@ -311,10 +343,13 @@ eframe::Renderer::Wgpu
 - [x] 独立 `StageSnapshot` + interaction 分辨率图；
 - [x] 帧拖动期间的键位映射/调色板临时预览（跳过音符生成）；
 - [x] 旋转拖动/帧拖动期间暂停自动转换，松手后按阶段决定是否生成音符；
-- [x] 音符按需生成：仅在 MIDI 阶段或导出时补齐。
+- [x] 音符按需生成：仅在 MIDI 阶段或导出时补齐；
+- [x] 时间方向（纵向/横向）、长度模式（原图长度/正方形像素/固定高度）；
+- [x] 非正方形像素，预览按源画布比例显示；
+- [x] 拍号设置、MIDI Time Signature Meta、预览小节线；PPQ/ticks/row 不触发图片重算；
 - [x] 音符生成列投影、网格重触发预计算、非稳定排序；
 - [x] 原图旋转（任意角度，源图阶段使用显示分辨率预览，转换在 worker 中执行）；
-- [x] 标尺/悬停坐标原点切换（左上角 / 左下角）；
+- [x] 坐标原点固定左下角（暂时不提供切换）；
 - [x] 左侧 Material Icons 流水线 + 四阶段中央视图（源图/键位/索引色/MIDI）；
 - [ ] 颜色拾取：点原图取色，编辑/替换调色板；
 - [ ] 手动调色板 + 自动调色板切换；
@@ -324,7 +359,7 @@ eframe::Renderer::Wgpu
 
 - 调色板算法：Octree、Median Cut、GMM、DBSCAN、Floyd/Ordered dithering；
 - 缩放算法：Bilinear、Bicubic、Lanczos、Area、Nearest、Mode pooling；
-- 高度模式、黑/白键六种组合、最大音符长度模式；
+- 黑/白键六种组合、最大音符长度模式；
 - 视频导入与选帧（ffmpeg / 原生解码后端）；解码后的帧和时长直接复用 `Palette::from_frames_cancellable()` 与 `convert_frames_with_progress()`；
 - SVG/PSD/TIFF 等格式；
 - 批量导出；

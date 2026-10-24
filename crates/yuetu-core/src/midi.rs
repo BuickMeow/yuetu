@@ -12,6 +12,44 @@ use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, T
 use crate::convert::ConversionResult;
 use crate::error::{Error, Result};
 
+/// Musical time signature. The denominator must be a power of two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimeSignature {
+    pub numerator: u8,
+    pub denominator: u8,
+}
+
+impl Default for TimeSignature {
+    fn default() -> Self {
+        Self {
+            numerator: 4,
+            denominator: 4,
+        }
+    }
+}
+
+impl TimeSignature {
+    /// Length of one beat in MIDI ticks.
+    pub fn beat_ticks(self, ppq: u16) -> f64 {
+        let denominator = self.denominator.max(1) as f64;
+        4.0 * f64::from(ppq.max(1)) / denominator
+    }
+
+    /// Length of one bar in MIDI ticks.
+    pub fn bar_ticks(self, ppq: u16) -> f64 {
+        self.beat_ticks(ppq) * f64::from(self.numerator.max(1))
+    }
+
+    fn denominator_power(self) -> u8 {
+        let denominator = self.denominator.max(1);
+        if denominator.is_power_of_two() {
+            denominator.trailing_zeros() as u8
+        } else {
+            2
+        }
+    }
+}
+
 /// MIDI-specific output settings. Kept separate from conversion settings so
 /// the preview can be regenerated without touching timing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +58,8 @@ pub struct MidiOutputConfig {
     pub ticks_per_pixel: u16,
     /// Pulses per quarter note.
     pub ppq: u16,
+    /// Time signature written at tick 0 and used for bar overlays.
+    pub time_signature: TimeSignature,
     /// Tempo written at tick 0.
     pub bpm: u16,
     /// Silence before the first note, in MIDI ticks.
@@ -33,6 +73,7 @@ impl Default for MidiOutputConfig {
         Self {
             ticks_per_pixel: 5,
             ppq: 960,
+            time_signature: TimeSignature::default(),
             bpm: 120,
             start_offset: 0,
             emit_color_events: true,
@@ -88,6 +129,11 @@ pub fn write_midi(path: &Path, result: &ConversionResult, config: &MidiOutputCon
         tick: 0,
         priority: 0,
         kind: EventKind::Tempo(config.bpm.max(1)),
+    });
+    tracks[0].push(TimedEvent {
+        tick: 0,
+        priority: 0,
+        kind: EventKind::TimeSignature(config.time_signature),
     });
 
     for payload_index in 0..color_payloads.len() {
@@ -176,6 +222,7 @@ struct TimedEvent {
 #[derive(Clone, Copy)]
 enum EventKind {
     Tempo(u16),
+    TimeSignature(TimeSignature),
     Color { payload_index: usize },
     NoteOn { channel: u8, key: u8 },
     NoteOff { channel: u8, key: u8 },
@@ -188,6 +235,12 @@ impl EventKind {
                 let micros = (60_000_000u32 / u32::from(bpm.max(1))).min(0x00FF_FFFF);
                 TrackEventKind::Meta(MetaMessage::Tempo(u24::new(micros)))
             }
+            Self::TimeSignature(signature) => TrackEventKind::Meta(MetaMessage::TimeSignature(
+                signature.numerator.max(1),
+                signature.denominator_power(),
+                24,
+                8,
+            )),
             Self::Color { payload_index } => {
                 // Matches the original ImageToMidi ColorEvent layout:
                 // 00 0F <channel> 00 <r> <g> <b> <a>
@@ -222,6 +275,16 @@ mod tests {
     use crate::palette::Palette;
 
     #[test]
+    fn bar_ticks_follow_the_time_signature() {
+        let signature = TimeSignature {
+            numerator: 6,
+            denominator: 8,
+        };
+        assert_eq!(signature.beat_ticks(960), 480.0);
+        assert_eq!(signature.bar_ticks(960), 2880.0);
+    }
+
+    #[test]
     fn writes_a_parseable_format_one_file() {
         let image = RgbaImage::new(1, 2, Color::rgb(255, 0, 0));
         let mut config = ConversionConfig {
@@ -253,6 +316,12 @@ mod tests {
             })
             .count();
         assert_eq!(note_ons, 1);
+        assert!(smf.tracks[0].iter().any(|event| {
+            matches!(
+                event.kind,
+                TrackEventKind::Meta(MetaMessage::TimeSignature(4, 2, _, _))
+            )
+        }));
 
         let _ = std::fs::remove_file(path);
     }

@@ -3,8 +3,12 @@ struct Uniform {
     viewport_size: vec2<f32>,
     content_left: f32,
     content_bottom: f32,
-    scale: f32,
-    _pad: f32,
+    scale_x: f32,
+    scale_y: f32,
+    horizontal: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniform;
@@ -40,10 +44,23 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> Vert
     );
     let corner = corners[vertex_index];
 
-    let left = u.content_left + instance.column * u.scale + 0.3;
-    let right = max(u.content_left + (instance.column + 1.0) * u.scale - 0.3, left + 0.5);
-    let top = u.content_bottom - instance.end * u.scale + 0.2;
-    let bottom = max(u.content_bottom - instance.start * u.scale - 0.2, top + 0.5);
+    var left: f32;
+    var right: f32;
+    var top: f32;
+    var bottom: f32;
+
+    if (u.horizontal > 0.5) {
+        left = u.content_left + instance.start * u.scale_x + 0.2;
+        right = max(u.content_left + instance.end * u.scale_x - 0.2, left + 0.5);
+        bottom = u.content_bottom - instance.column * u.scale_y - 0.3;
+        top = min(u.content_bottom - (instance.column + 1.0) * u.scale_y + 0.3, bottom - 0.5);
+    } else {
+        left = u.content_left + instance.column * u.scale_x + 0.3;
+        right = max(u.content_left + (instance.column + 1.0) * u.scale_x - 0.3, left + 0.5);
+        top = u.content_bottom - instance.end * u.scale_y + 0.2;
+        bottom = max(u.content_bottom - instance.start * u.scale_y - 0.2, top + 0.5);
+    }
+
     let point = vec2<f32>(
         mix(left, right, corner.x),
         mix(top, bottom, corner.y),

@@ -126,11 +126,19 @@ fn hover_info(ui: &mut Ui, hover: StageHover, coordinate_origin: CoordinateOrigi
             color,
             key,
             height,
+            time_axis,
         } => {
             color_swatch(ui, color);
             let mapped = key.map(note_name).unwrap_or_else(|| "静音".to_owned());
-            let y = coordinate_origin.display_y(pos.1, height);
-            ui.label(format!("({}, {}) · {}", pos.0, y, mapped));
+            match time_axis {
+                yuetu_core::TimeAxis::Vertical => {
+                    let y = coordinate_origin.display_y(pos.1, height);
+                    ui.label(format!("({}, {}) · {}", pos.0, y, mapped));
+                }
+                yuetu_core::TimeAxis::Horizontal => {
+                    ui.label(format!("时间 {} · {}", pos.0, mapped));
+                }
+            }
         }
         StageHover::Palette { index, color } => {
             color_swatch(ui, color);
