@@ -8,8 +8,10 @@ use crate::state::{PipelineStage, StageStop};
 use crate::theme;
 
 pub const WIDTH: f32 = 32.0;
-const TRACK_W: f32 = 8.0;
 const THUMB_RADIUS: f32 = 12.0;
+/// Keep the track's width and corner radius identical to the active circle.
+const TRACK_W: f32 = THUMB_RADIUS * 2.0;
+const TRACK_RADIUS: f32 = THUMB_RADIUS;
 const ICON_SIZE: f32 = 18.0;
 
 fn stage_icon(stage: PipelineStage) -> MaterialIcon {
@@ -71,7 +73,7 @@ pub fn show(
                 egui::pos2(center_x + TRACK_W * 0.5, bottom),
             );
             ui.painter()
-                .rect_filled(track, TRACK_W * 0.5, ui.visuals().widgets.inactive.bg_fill);
+                .rect_filled(track, TRACK_RADIUS, ui.visuals().widgets.inactive.bg_fill);
 
             let selected_stage = chosen.unwrap_or(current);
             let selected_y = stops

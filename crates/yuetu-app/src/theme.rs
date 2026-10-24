@@ -121,7 +121,12 @@ pub fn panel_frame(ui: &Ui, kind: PanelKind) -> Frame {
                 top: 0,
                 bottom: 8,
             }),
-            PanelKind::Side => Frame::side_top_panel(ui.style()),
+            PanelKind::Side => Frame::side_top_panel(ui.style()).inner_margin(Margin {
+                left: 8,
+                right: 8,
+                top: 8,
+                bottom: 8,
+            }),
         };
     }
 
