@@ -74,9 +74,18 @@ pub fn generate_notes_with_progress(
     let mut notes = Vec::new();
     let mut count_by_track = vec![0usize; track_count];
 
-    let mut column_color = vec![TRANSPARENT_ID; width];
-    let mut column_start = vec![0u32; width];
-    let mut column_last_on = vec![0u32; width];
+    // Resolve the key map once. Silent columns are skipped entirely instead of
+    // paying a `key_at` call for every pixel row.
+    let mut columns: Vec<(usize, u8)> = Vec::with_capacity(width);
+    for column in 0..width {
+        if let Some(key) = keymap.key_at(column as u32) {
+            columns.push((column, key));
+        }
+    }
+
+    let mut column_color = vec![TRANSPARENT_ID; columns.len()];
+    let mut column_start = vec![0u32; columns.len()];
+    let mut column_last_on = vec![0u32; columns.len()];
 
     let height = indexed.height;
     let mut time = 0u32;
@@ -85,24 +94,25 @@ pub fn generate_notes_with_progress(
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
+        let row_start = row as usize * width;
+        let grid_retrigger = max_note_length > 0
+            && measure_from_start
+            && time > 0
+            && time.is_multiple_of(max_note_length);
 
-        for column in 0..width {
-            let Some(key) = keymap.key_at(column as u32) else {
-                continue;
-            };
-
-            let mut new_color = indexed.at(column as u32, row);
+        for (position, &(column, key)) in columns.iter().enumerate() {
+            let mut new_color = indexed.indices[row_start + column];
             if new_color < 0 || new_color as usize >= track_count {
                 new_color = TRANSPARENT_ID;
             }
 
-            let old_color = column_color[column];
+            let old_color = column_color[position];
             let force_retrigger = max_note_length > 0
                 && old_color >= 0
                 && if measure_from_start {
-                    time > 0 && time % max_note_length == 0
+                    grid_retrigger
                 } else {
-                    time.saturating_sub(column_last_on[column]) >= max_note_length
+                    time.saturating_sub(column_last_on[position]) >= max_note_length
                 };
 
             if new_color != old_color || force_retrigger {
@@ -113,16 +123,16 @@ pub fn generate_notes_with_progress(
                         Note {
                             key,
                             track: old_color as u16,
-                            start: column_start[column],
+                            start: column_start[position],
                             end: time,
                         },
                     );
                 }
 
-                column_color[column] = new_color;
+                column_color[position] = new_color;
                 if new_color >= 0 {
-                    column_start[column] = time;
-                    column_last_on[column] = time;
+                    column_start[position] = time;
+                    column_last_on[position] = time;
                 }
             }
         }
@@ -139,27 +149,24 @@ pub fn generate_notes_with_progress(
     }
 
     // Close every note still ringing at the top edge.
-    for column in 0..width {
-        let color = column_color[column];
+    for (position, &(_, key)) in columns.iter().enumerate() {
+        let color = column_color[position];
         if color < 0 {
             continue;
         }
-        let Some(key) = keymap.key_at(column as u32) else {
-            continue;
-        };
         push_note(
             &mut notes,
             &mut count_by_track,
             Note {
                 key,
                 track: color as u16,
-                start: column_start[column],
+                start: column_start[position],
                 end: time,
             },
         );
     }
 
-    notes.sort_by_key(|note| (note.start, note.track, note.key, note.end));
+    notes.sort_unstable_by_key(|note| (note.start, note.track, note.key, note.end));
 
     report(progress, Stage::Notes, 1.0);
     Ok((notes, count_by_track))

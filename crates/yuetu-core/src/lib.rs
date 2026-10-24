@@ -32,8 +32,8 @@ pub mod rotate;
 
 pub use color::Color;
 pub use convert::{
-    ConversionConfig, ConversionResult, PaletteScope, convert, convert_frames_with_progress,
-    convert_with_progress,
+    ConversionConfig, ConversionResult, PaletteScope, convert,
+    convert_frames_with_palette_and_progress, convert_frames_with_progress, convert_with_progress,
 };
 pub use error::{Error, Result};
 pub use image::{

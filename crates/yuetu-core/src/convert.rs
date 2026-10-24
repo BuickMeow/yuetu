@@ -140,6 +140,32 @@ pub fn convert_frames_with_progress(
     progress: Option<&dyn Progress>,
     cancel: &AtomicBool,
 ) -> Result<ConversionResult> {
+    convert_frames_with_palette_and_progress(
+        image,
+        palette_frames,
+        delays_ms,
+        None,
+        config,
+        progress,
+        cancel,
+    )
+}
+
+/// Like [`convert_frames_with_progress`], but can reuse a palette that was
+/// already clustered for the same animation sequence.
+///
+/// When a shared palette is supplied, the palette stage is skipped entirely,
+/// which is the expensive part of scrubbing through a long animation.
+#[allow(clippy::too_many_arguments)]
+pub fn convert_frames_with_palette_and_progress(
+    image: &RgbaImage,
+    palette_frames: &[&RgbaImage],
+    delays_ms: &[u32],
+    shared_palette: Option<&Palette>,
+    config: &ConversionConfig,
+    progress: Option<&dyn Progress>,
+    cancel: &AtomicBool,
+) -> Result<ConversionResult> {
     if image.is_empty() {
         return Err(Error::InvalidImage("源图为空".into()));
     }
@@ -165,21 +191,27 @@ pub fn convert_frames_with_progress(
     let palette = match &config.manual_palette {
         Some(palette) if !palette.is_empty() => palette.clone(),
         Some(_) => return Err(Error::Config("手动调色板不能为空".into())),
-        None if config.palette_scope == PaletteScope::AllFrames && !palette_frames.is_empty() => {
-            Palette::from_frames_cancellable(
-                palette_frames.iter().copied(),
-                delays_ms,
-                config.palette_colors.max(1),
-                Some(cancel),
-                progress,
-            )?
+        None => {
+            if let Some(palette) = shared_palette.filter(|palette| !palette.is_empty()) {
+                palette.clone()
+            } else if config.palette_scope == PaletteScope::AllFrames && !palette_frames.is_empty()
+            {
+                Palette::from_frames_cancellable(
+                    palette_frames.iter().copied(),
+                    delays_ms,
+                    config.palette_colors.max(1),
+                    Some(cancel),
+                    progress,
+                )?
+            } else {
+                Palette::from_image_cancellable(
+                    source,
+                    config.palette_colors.max(1),
+                    Some(cancel),
+                    progress,
+                )?
+            }
         }
-        None => Palette::from_image_cancellable(
-            source,
-            config.palette_colors.max(1),
-            Some(cancel),
-            progress,
-        )?,
     };
     report(progress, Stage::Palette, 1.0);
     if palette.is_empty() {
@@ -476,6 +508,34 @@ mod tests {
 
         assert_eq!(result.palette.len(), 1);
         assert_eq!(result.palette.colors[0], Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn supplied_shared_palette_overrides_frame_clustering() {
+        let image = RgbaImage::new(2, 2, Color::rgb(255, 0, 0));
+        let other = RgbaImage::new(2, 2, Color::rgb(0, 0, 255));
+        let palette = Palette::new(vec![Color::rgb(0, 255, 0), Color::rgb(255, 255, 0)]);
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 60,
+            palette_colors: 2,
+            palette_scope: PaletteScope::AllFrames,
+            ..ConversionConfig::default()
+        };
+        let cancel = AtomicBool::new(false);
+
+        let result = convert_frames_with_palette_and_progress(
+            &image,
+            &[&image, &other],
+            &[100, 100],
+            Some(&palette),
+            &config,
+            None,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(result.palette, palette);
     }
 
     #[test]

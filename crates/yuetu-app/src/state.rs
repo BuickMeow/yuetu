@@ -250,7 +250,7 @@ impl PipelineStage {
             Self::Source => "源图",
             Self::KeyMap => "键位映射",
             Self::Palette => "调色板",
-            Self::Midi => "MIDI 输出",
+            Self::Midi => "MIDI 生成",
         }
     }
 

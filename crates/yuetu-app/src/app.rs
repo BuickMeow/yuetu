@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use egui::{Key, Modifiers};
-use yuetu_core::{ConversionConfig, PaletteScope, Stage};
+use yuetu_core::{ConversionConfig, Palette, PaletteScope, Stage};
 
 use crate::jobs::{JobEvent, JobRunner, ProgressView};
 use crate::settings::Settings;
@@ -19,10 +19,22 @@ use crate::widgets::{View2D, split_handle, stage_rail};
 /// feeling immediate.
 const AUTO_CONVERT_DEBOUNCE: Duration = Duration::from_millis(80);
 
+/// Palette clustered from a whole animation sequence. Frame changes do not
+/// invalidate it: only loading a new source or changing the palette settings
+/// does. This keeps timeline scrubbing from re-scanning every frame.
+struct SharedPaletteCache {
+    source_generation: u64,
+    palette_colors: usize,
+    palette: Palette,
+}
+
 pub struct YuetuApp {
     source: Option<SourceImage>,
+    /// Increments whenever the source sequence changes (new file).
+    source_generation: u64,
     /// Increments whenever the source pixels change (new image or GIF frame).
     source_revision: u64,
+    shared_palette_cache: Option<SharedPaletteCache>,
     preview: Option<Preview>,
     settings: Settings,
 
@@ -46,6 +58,7 @@ pub struct YuetuApp {
     job_progress: Option<ProgressView>,
     job_config: Option<ConversionConfig>,
     job_source_revision: Option<u64>,
+    job_source_generation: Option<u64>,
     job_started: Option<Instant>,
     /// When the next automatic conversion should start. `None` means no
     /// parameters changed since the last result/job.
@@ -66,7 +79,9 @@ impl YuetuApp {
 
         let mut app = Self {
             source: None,
+            source_generation: 0,
             source_revision: 0,
+            shared_palette_cache: None,
             preview: None,
             settings: Settings::default(),
             stage: PipelineStage::Source,
@@ -87,6 +102,7 @@ impl YuetuApp {
             job_progress: None,
             job_config: None,
             job_source_revision: None,
+            job_source_generation: None,
             job_started: None,
             auto_convert_at: None,
             left_panel_width: 310.0,
@@ -116,11 +132,14 @@ impl YuetuApp {
         self.job_progress = None;
         self.job_config = None;
         self.job_source_revision = None;
+        self.job_source_generation = None;
         self.job_started = None;
         self.auto_convert_at = None;
 
         match SourceImage::load(ctx, path.clone()) {
             Ok(source) => {
+                self.source_generation = self.source_generation.wrapping_add(1);
+                self.shared_palette_cache = None;
                 self.settings.rotation_deg = 0.0;
                 self.status = StatusMessage::success(format!(
                     "已加载 {} · {} × {} px",
@@ -159,25 +178,43 @@ impl YuetuApp {
         }
 
         let config = self.settings.conversion_config();
-        let palette_frames = if config.palette_scope == PaletteScope::AllFrames {
+        let shared_palette =
+            if config.palette_scope == PaletteScope::AllFrames && config.manual_palette.is_none() {
+                self.shared_palette_cache
+                    .as_ref()
+                    .filter(|cache| {
+                        cache.source_generation == self.source_generation
+                            && cache.palette_colors == config.palette_colors
+                    })
+                    .map(|cache| cache.palette.clone())
+            } else {
+                None
+            };
+        let need_palette_frames =
+            config.palette_scope == PaletteScope::AllFrames && shared_palette.is_none();
+        let palette_frames = if need_palette_frames {
             source.palette_frames().to_vec()
         } else {
             Vec::new()
         };
-        let delays_ms = if config.palette_scope == PaletteScope::AllFrames {
+        let delays_ms = if need_palette_frames {
             source.delays_ms().to_vec()
         } else {
             Vec::new()
         };
+        let image = source.image.clone();
+        let source_generation = self.source_generation;
         match self.jobs.start(
-            source.image.clone(),
+            image,
             palette_frames,
             delays_ms,
+            shared_palette,
             config.clone(),
         ) {
             Ok(_) => {
                 self.job_config = Some(config);
                 self.job_source_revision = Some(self.source_revision);
+                self.job_source_generation = Some(source_generation);
                 self.job_started = Some(Instant::now());
                 self.job_progress = Some(ProgressView::new(Stage::Palette, 0.0));
                 self.status = StatusMessage::info("正在生成");
@@ -188,6 +225,7 @@ impl YuetuApp {
                 self.job_progress = None;
                 self.job_config = None;
                 self.job_source_revision = None;
+                self.job_source_generation = None;
                 self.job_started = None;
                 self.status = StatusMessage::error(format!("无法启动转换任务：{error}"));
             }
@@ -249,6 +287,7 @@ impl YuetuApp {
         self.job_progress = None;
         self.job_config = None;
         self.job_source_revision = None;
+        self.job_source_generation = None;
         self.job_started = None;
         self.status = StatusMessage::warning("已取消生成");
     }
@@ -296,9 +335,20 @@ impl YuetuApp {
                         .unwrap_or_default();
                     let config = self.job_config.take().unwrap_or_default();
                     let source_revision = self.job_source_revision.take().unwrap_or_default();
+                    let job_source_generation = self.job_source_generation.take();
                     let current = self.settings.conversion_config();
                     let had_preview = self.preview.is_some();
                     self.job_progress = None;
+                    if config.palette_scope == PaletteScope::AllFrames
+                        && config.manual_palette.is_none()
+                        && job_source_generation == Some(self.source_generation)
+                    {
+                        self.shared_palette_cache = Some(SharedPaletteCache {
+                            source_generation: self.source_generation,
+                            palette_colors: config.palette_colors,
+                            palette: result.palette.clone(),
+                        });
+                    }
                     if config == current && source_revision == self.source_revision {
                         self.status = StatusMessage::success(format!(
                             "生成完成：{} 音符 · {} 音轨 · 用时 {:.1} ms",
@@ -331,6 +381,7 @@ impl YuetuApp {
                     self.job_progress = None;
                     self.job_config = None;
                     self.job_source_revision = None;
+                    self.job_source_generation = None;
                     self.job_started = None;
                     tracing::warn!("conversion failed: {message}");
                     self.status = StatusMessage::error(format!("转换失败：{message}"));
@@ -339,6 +390,7 @@ impl YuetuApp {
                     self.job_progress = None;
                     self.job_config = None;
                     self.job_source_revision = None;
+                    self.job_source_generation = None;
                     self.job_started = None;
                     self.status = StatusMessage::warning("已取消生成");
                 }

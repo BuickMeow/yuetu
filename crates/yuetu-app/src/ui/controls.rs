@@ -238,7 +238,7 @@ pub fn show(
 
             ui.add_space(10.0);
             let (_, rect) = card_with_rect(ui, |ui| {
-                section_title(ui, "MIDI 输出");
+                section_title(ui, "MIDI 生成");
 
                 setting_row(ui, "限制最大音符长度", |ui| {
                     ui.add(egui::Checkbox::without_text(
