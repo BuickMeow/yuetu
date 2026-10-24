@@ -809,7 +809,6 @@ impl eframe::App for YuetuApp {
                 stage_action = ui::stage_panel::show(
                     ui,
                     stage,
-                    self.coordinate_origin,
                     source,
                     preview,
                     &self.settings.midi_config(),

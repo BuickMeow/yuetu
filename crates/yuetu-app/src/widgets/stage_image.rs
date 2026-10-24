@@ -2,7 +2,6 @@
 
 use egui::{Color32, CursorIcon, FontId, Rect, Stroke, StrokeKind, Ui};
 
-use crate::state::CoordinateOrigin;
 use crate::theme;
 use crate::widgets::view2d::View2D;
 
@@ -21,7 +20,6 @@ pub fn show(
     grid_size: (u32, u32),
     checkerboard: bool,
     checker_texture: egui::TextureId,
-    coordinate_origin: CoordinateOrigin,
 ) -> Option<RasterHover> {
     let size = egui::vec2(display_size.0.max(1) as f32, display_size.1.max(1) as f32);
     let interaction = view.interact(ui, size, CursorIcon::Crosshair);
@@ -67,7 +65,7 @@ pub fn show(
         }
     }
 
-    draw_rulers(ui, &painter, &interaction, display_size, coordinate_origin);
+    draw_rulers(ui, &painter, &interaction, display_size);
     hovered
 }
 
@@ -106,7 +104,6 @@ fn draw_rulers(
     painter: &egui::Painter,
     interaction: &crate::widgets::view2d::ViewInteraction,
     content_size: (u32, u32),
-    coordinate_origin: CoordinateOrigin,
 ) {
     if interaction.scale <= 1e-6 {
         return;
@@ -135,24 +132,6 @@ fn draw_rulers(
     painter.rect_filled(corner, 0.0, ruler_fill);
     painter.rect_filled(top_band, 0.0, ruler_fill);
     painter.rect_filled(left_band, 0.0, ruler_fill);
-
-    let edge = theme::faint(ui).gamma_multiply(0.45);
-    // The corner is a real cell, not an accidental intersection: close its
-    // right and bottom edges, then continue the same lines along the rulers.
-    painter.line_segment(
-        [
-            egui::pos2(corner.left(), corner.bottom()),
-            egui::pos2(viewport.right(), corner.bottom()),
-        ],
-        Stroke::new(1.0, edge),
-    );
-    painter.line_segment(
-        [
-            egui::pos2(corner.right(), corner.top()),
-            egui::pos2(corner.right(), viewport.bottom()),
-        ],
-        Stroke::new(1.0, edge),
-    );
 
     let step = ruler_step(interaction.scale);
     let tick_color = theme::muted(ui).gamma_multiply(0.75);
@@ -189,33 +168,78 @@ fn draw_rulers(
         x = x.saturating_add(step);
     }
 
-    let first_y = (((viewport.top() - content.top()) / interaction.scale).floor()).max(0.0) as u32;
-    let last_y = (((viewport.bottom() - content.top()) / interaction.scale).ceil())
-        .clamp(0.0, content_size.1 as f32) as u32;
+    // Time/Y ruler starts at 0 on the bottom edge and runs upward.
+    let height = content_size.1 as f32;
+    let first_y = (((content.bottom() - viewport.bottom()) / interaction.scale).floor())
+        .clamp(0.0, height) as u32;
+    let last_y = (((content.bottom() - viewport.top()) / interaction.scale).ceil())
+        .clamp(0.0, height) as u32;
     let start_y = (first_y / step) * step;
     let mut y = start_y;
     while y <= last_y {
-        let sy = content.top() + y as f32 * interaction.scale;
-        if sy >= viewport.top() + TOP && sy <= viewport.bottom() {
-            painter.line_segment(
-                [
-                    egui::pos2(viewport.left() + LEFT - 4.0, sy),
-                    egui::pos2(viewport.left() + LEFT, sy),
-                ],
-                Stroke::new(1.0, tick_color),
-            );
-            let label_top = (sy + 1.0).min(viewport.bottom() - 11.0);
-            let label_y = coordinate_origin.display_y(y, content_size.1);
-            painter.text(
-                egui::pos2(viewport.left() + LEFT - 4.0, label_top),
-                egui::Align2::RIGHT_TOP,
-                label_y.to_string(),
-                font.clone(),
-                label_color,
-            );
-        }
+        draw_y_tick(
+            painter,
+            &font,
+            label_color,
+            tick_color,
+            viewport,
+            content,
+            interaction.scale,
+            LEFT,
+            TOP,
+            y,
+        );
         y = y.saturating_add(step);
     }
+    let top = content_size.1;
+    if top % step != 0 && top >= first_y && top <= last_y {
+        draw_y_tick(
+            painter,
+            &font,
+            label_color,
+            tick_color,
+            viewport,
+            content,
+            interaction.scale,
+            LEFT,
+            TOP,
+            top,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_y_tick(
+    painter: &egui::Painter,
+    font: &FontId,
+    label_color: egui::Color32,
+    tick_color: egui::Color32,
+    viewport: Rect,
+    content: Rect,
+    scale: f32,
+    left: f32,
+    top: f32,
+    coordinate: u32,
+) {
+    let sy = content.bottom() - coordinate as f32 * scale;
+    if sy < viewport.top() + top || sy > viewport.bottom() {
+        return;
+    }
+    painter.line_segment(
+        [
+            egui::pos2(viewport.left() + left - 4.0, sy),
+            egui::pos2(viewport.left() + left, sy),
+        ],
+        Stroke::new(1.0, tick_color),
+    );
+    let label_top = (sy + 1.0).min(viewport.bottom() - 11.0);
+    painter.text(
+        egui::pos2(viewport.left() + left - 4.0, label_top),
+        egui::Align2::RIGHT_TOP,
+        coordinate.to_string(),
+        font.clone(),
+        label_color,
+    );
 }
 
 fn ruler_step(scale: f32) -> u32 {

@@ -3,9 +3,7 @@ use egui_extras::{Size, StripBuilder};
 use yuetu_core::{Color, MidiOutputConfig, TimeAxis};
 
 use crate::jobs::ProgressView;
-use crate::state::{
-    CoordinateOrigin, PipelineStage, Preview, SourceImage, StageHover, StageSnapshot,
-};
+use crate::state::{PipelineStage, Preview, SourceImage, StageHover, StageSnapshot};
 use crate::theme;
 use crate::widgets::{View2D, midi_preview, stage_image};
 
@@ -18,7 +16,6 @@ pub struct Action {
 pub fn show(
     ui: &mut Ui,
     stage: PipelineStage,
-    coordinate_origin: CoordinateOrigin,
     source: Option<&SourceImage>,
     preview: Option<&Preview>,
     midi_config: &MidiOutputConfig,
@@ -47,7 +44,6 @@ pub fn show(
                 source.display_size,
                 source.has_transparency,
                 checker_texture,
-                coordinate_origin,
             );
             *hover = hovered.map(|pixel| StageHover::Source {
                 pos: (pixel.x, pixel.y),
@@ -100,7 +96,6 @@ pub fn show(
                         size,
                         transparency,
                         checker_texture,
-                        coordinate_origin,
                     );
                     *hover = hovered.map(|pixel| {
                         let key_position = match time_axis {
@@ -154,7 +149,6 @@ pub fn show(
                         size,
                         transparency,
                         checker_texture,
-                        coordinate_origin,
                     );
                     *hover = hovered.map(|pixel| {
                         let index = indexed.at(pixel.x, pixel.y);
