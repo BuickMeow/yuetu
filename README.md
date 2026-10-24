@@ -41,6 +41,14 @@ cargo run -p yuetu-app --release -- path/to/image.png
 cargo run -p yuetu-app
 ```
 
+## 测试图片
+
+`testdata/` 收了一组小型手动用例：静态网格、透明稀疏图、40/300 帧动画、共享调色板动画和 800×800 扫帧动画。说明见 [`testdata/README.md`](testdata/README.md)，解码回归：
+
+```bash
+cargo test -p yuetu-core --test testdata
+```
+
 ## 目录
 
 ```text
