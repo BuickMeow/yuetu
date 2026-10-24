@@ -393,10 +393,10 @@ impl Preview {
         })
     }
 
-    /// Fast intermediate image refresh used while scrubbing frames on the
-    /// key-map or palette stage. This deliberately uses nearest-neighbor
-    /// resizing: it is only a transient preview; the final conversion uses the
-    /// configured resize algorithm. Notes and MIDI instances stay untouched.
+    /// Intermediate image refresh used while scrubbing frames on the
+    /// key-map or palette stage. It uses the same resize algorithm as the
+    /// final conversion so releasing the mouse does not change the picture.
+    /// Notes and MIDI instances stay untouched until the final conversion.
     pub fn update_scrub_frame(
         &mut self,
         image: &RgbaImage,
@@ -425,12 +425,7 @@ impl Preview {
                 .max(1.0) as u32
         };
 
-        let resized = resize(
-            source,
-            target_width,
-            target_height,
-            ResizeAlgorithm::Nearest,
-        )?;
+        let resized = resize(source, target_width, target_height, config.resize)?;
         let indexed = quantize(&resized, palette);
 
         let indexed_rgba = indexed_to_rgba(&indexed, palette)?;
