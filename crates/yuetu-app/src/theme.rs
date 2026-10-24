@@ -112,14 +112,17 @@ pub fn panel_frame(ui: &Ui, kind: PanelKind) -> Frame {
     if !CUSTOM_THEME {
         return match kind {
             PanelKind::Central => Frame::central_panel(ui.style()),
-            PanelKind::Bottom | PanelKind::Side => Frame::side_top_panel(ui.style()),
+            PanelKind::Bottom => {
+                Frame::side_top_panel(ui.style()).inner_margin(Margin::symmetric(8, 8))
+            }
+            PanelKind::Side => Frame::side_top_panel(ui.style()),
         };
     }
 
     match kind {
         PanelKind::Bottom => Frame::new()
             .fill(BG_APP)
-            .inner_margin(Margin::symmetric(12, 5)),
+            .inner_margin(Margin::symmetric(12, 12)),
         PanelKind::Side => Frame::new().fill(BG_PANEL).inner_margin(Margin::same(12)),
         PanelKind::Central => Frame::new().fill(BG_PANEL).inner_margin(Margin::same(10)),
     }

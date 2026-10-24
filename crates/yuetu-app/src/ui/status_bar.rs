@@ -1,15 +1,17 @@
 use egui::{RichText, Ui};
 use egui_material_icons::MaterialIcon;
-use egui_material_icons::icons::{ICON_FIT_WIDTH, ICON_PERCENT};
+use egui_material_icons::icons::{ICON_FIT_SCREEN, ICON_FULLSCREEN, ICON_PERCENT};
 use yuetu_core::{Color, note_name};
 
-use crate::state::{PipelineStage, StageHover, StatusKind, StatusMessage};
+use crate::state::{PipelineStage, StageHover, StatusKind, StatusMessage, ZoomPreset};
 use crate::theme;
+
+const CONTROL_SIZE: egui::Vec2 = egui::vec2(64.0, 26.0);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Action {
     pub set_zoom_percent: Option<f32>,
-    pub fit_width: bool,
+    pub zoom_preset: Option<ZoomPreset>,
 }
 
 pub fn show(
@@ -18,6 +20,7 @@ pub fn show(
     stage: PipelineStage,
     hover: Option<StageHover>,
     zoom_percent: f32,
+    zoom_mode: ZoomPreset,
     zoom_enabled: bool,
 ) -> Action {
     let mut action = Action::default();
@@ -34,22 +37,23 @@ pub fn show(
         ui.label(RichText::new(status.text.as_str()).color(status_color));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if icon_button(ui, ICON_FIT_WIDTH, zoom_enabled, "按宽度缩放").clicked() {
-                action.fit_width = true;
-            }
-            if icon_button(ui, ICON_PERCENT, zoom_enabled, "100%").clicked() {
-                action.set_zoom_percent = Some(100.0);
+            if icon_button(ui, zoom_icon(zoom_mode), zoom_enabled, zoom_mode.label()).clicked() {
+                action.zoom_preset = Some(zoom_mode.next());
             }
 
             let mut percent = zoom_percent;
-            let response = ui.add_enabled(
-                zoom_enabled,
-                egui::DragValue::new(&mut percent)
-                    .range(1.0..=6400.0)
-                    .speed(1.0)
-                    .max_decimals(0)
-                    .suffix("%"),
-            );
+            let response = ui
+                .add_enabled_ui(zoom_enabled, |ui| {
+                    ui.add_sized(
+                        CONTROL_SIZE,
+                        egui::DragValue::new(&mut percent)
+                            .range(1.0..=6400.0)
+                            .speed(1.0)
+                            .max_decimals(0)
+                            .suffix("%"),
+                    )
+                })
+                .inner;
             if response.changed() {
                 action.set_zoom_percent = Some(percent);
             }
@@ -88,14 +92,22 @@ pub fn show(
     action
 }
 
+fn zoom_icon(mode: ZoomPreset) -> MaterialIcon {
+    match mode {
+        ZoomPreset::Fit => ICON_FIT_SCREEN,
+        ZoomPreset::Fill => ICON_FULLSCREEN,
+        ZoomPreset::Actual => ICON_PERCENT,
+    }
+}
+
 fn icon_button(ui: &mut Ui, icon: MaterialIcon, enabled: bool, tooltip: &str) -> egui::Response {
     let text = RichText::new(icon.codepoint)
         .family(icon.font_family())
         .size(18.0);
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(text).min_size(egui::vec2(30.0, 26.0)),
-    )
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.add_sized(CONTROL_SIZE, egui::Button::new(text))
+    })
+    .inner
     .on_hover_text(tooltip)
 }
 

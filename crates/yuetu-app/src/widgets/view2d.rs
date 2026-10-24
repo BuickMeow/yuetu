@@ -76,11 +76,19 @@ impl View2D {
         self.last_scale = self.last_fit * self.zoom;
     }
 
-    pub fn fit_width(&mut self) {
-        if self.last_content_size.x <= 0.0 || self.last_viewport.width() <= 0.0 {
+    /// Cover the viewport. This is intentionally `max(width_ratio,
+    /// height_ratio)`, so tall images fill the width instead of shrinking to
+    /// fit vertically.
+    pub fn fill(&mut self) {
+        if self.last_content_size.x <= 0.0
+            || self.last_content_size.y <= 0.0
+            || self.last_viewport.width() <= 0.0
+            || self.last_viewport.height() <= 0.0
+        {
             return;
         }
-        let target_scale = ((self.last_viewport.width() / self.last_content_size.x) * 0.98)
+        let target_scale = (self.last_viewport.width() / self.last_content_size.x)
+            .max(self.last_viewport.height() / self.last_content_size.y)
             .clamp(MIN_ABSOLUTE_SCALE as f32, MAX_ABSOLUTE_SCALE as f32);
         self.zoom = (target_scale / self.last_fit).clamp(0.02, 120.0);
         self.pan = Vec2::ZERO;

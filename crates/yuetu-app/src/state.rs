@@ -136,6 +136,41 @@ impl PipelineStage {
             Self::Midi => "MIDI 输出",
         }
     }
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Source => 0,
+            Self::KeyMap => 1,
+            Self::Palette => 2,
+            Self::Midi => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ZoomPreset {
+    #[default]
+    Fit,
+    Fill,
+    Actual,
+}
+
+impl ZoomPreset {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Fit => Self::Fill,
+            Self::Fill => Self::Actual,
+            Self::Actual => Self::Fit,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fit => "适应",
+            Self::Fill => "填充",
+            Self::Actual => "100%",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

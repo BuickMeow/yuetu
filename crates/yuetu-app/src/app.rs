@@ -6,7 +6,9 @@ use yuetu_core::{ConversionConfig, Stage};
 
 use crate::jobs::{JobEvent, JobRunner, ProgressView};
 use crate::settings::Settings;
-use crate::state::{PipelineStage, Preview, SourceImage, StageHover, StageStop, StatusMessage};
+use crate::state::{
+    PipelineStage, Preview, SourceImage, StageHover, StageStop, StatusMessage, ZoomPreset,
+};
 use crate::theme;
 use crate::ui;
 use crate::widgets::{View2D, split_handle, stage_rail};
@@ -32,6 +34,7 @@ pub struct YuetuApp {
     key_view: View2D,
     palette_view: View2D,
     midi_view: View2D,
+    zoom_modes: [ZoomPreset; 4],
 
     status: StatusMessage,
 
@@ -71,6 +74,7 @@ impl YuetuApp {
             key_view: View2D::default(),
             palette_view: View2D::default(),
             midi_view: View2D::default(),
+            zoom_modes: [ZoomPreset::Fit; 4],
             status: StatusMessage::default(),
             jobs: JobRunner::new(),
             job_progress: None,
@@ -123,6 +127,7 @@ impl YuetuApp {
                 self.key_view.reset_fit();
                 self.palette_view.reset_fit();
                 self.midi_view.reset_fit();
+                self.zoom_modes = [ZoomPreset::Fit; 4];
                 self.schedule_auto_conversion(ctx, Duration::ZERO);
             }
             Err(error) => {
@@ -432,6 +437,7 @@ impl eframe::App for YuetuApp {
                     self.stage,
                     self.stage_hover,
                     self.current_zoom_percent(),
+                    self.zoom_modes[self.stage.index()],
                     zoom_enabled,
                 );
             });
@@ -554,12 +560,17 @@ impl eframe::App for YuetuApp {
             self.cancel_conversion();
             acted = true;
         }
-        if let Some(percent) = status_action.set_zoom_percent {
-            self.current_view_mut().set_absolute_zoom_percent(percent);
+        if let Some(preset) = status_action.zoom_preset {
+            match preset {
+                ZoomPreset::Fit => self.current_view_mut().reset_fit(),
+                ZoomPreset::Fill => self.current_view_mut().fill(),
+                ZoomPreset::Actual => self.current_view_mut().set_absolute_zoom_percent(100.0),
+            }
+            self.zoom_modes[self.stage.index()] = preset;
             acted = true;
         }
-        if status_action.fit_width {
-            self.current_view_mut().fit_width();
+        if let Some(percent) = status_action.set_zoom_percent {
+            self.current_view_mut().set_absolute_zoom_percent(percent);
             acted = true;
         }
 
