@@ -68,12 +68,15 @@ pub fn show(
             }
 
             let center_x = x + WIDTH * 0.5;
+            // Extend the rounded track caps by one radius so the cap centers
+            // coincide with the first/last stage centers. The active circle
+            // then covers the cap completely instead of leaving a gray rim.
             let track = Rect::from_min_max(
-                egui::pos2(center_x - TRACK_W * 0.5, top),
-                egui::pos2(center_x + TRACK_W * 0.5, bottom),
+                egui::pos2(center_x - TRACK_W * 0.5, top - THUMB_RADIUS),
+                egui::pos2(center_x + TRACK_W * 0.5, bottom + THUMB_RADIUS),
             );
             ui.painter()
-                .rect_filled(track, TRACK_RADIUS, ui.visuals().widgets.inactive.bg_fill);
+                .rect_filled(track, TRACK_RADIUS, theme::rail_track(ui));
 
             let selected_stage = chosen.unwrap_or(current);
             let selected_y = stops

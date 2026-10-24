@@ -1,4 +1,5 @@
 use egui::{RichText, Ui};
+use egui_extras::{Size, StripBuilder};
 use yuetu_core::Color;
 
 use crate::jobs::ProgressView;
@@ -128,8 +129,7 @@ fn empty_source(ui: &mut Ui, action: &mut Action) {
     theme::view_frame(ui).show(ui, |ui| {
         let min = (rect.size() - egui::vec2(24.0, 24.0)).max(egui::vec2(1.0, 1.0));
         ui.set_min_size(min);
-        ui.vertical_centered(|ui| {
-            ui.add_space((rect.height() * 0.32).max(24.0));
+        centered_content(ui, 78.0, |ui| {
             ui.label(RichText::new("把图片拖进来").size(22.0));
             ui.add_space(10.0);
             if ui
@@ -146,13 +146,27 @@ fn empty_source(ui: &mut Ui, action: &mut Action) {
     });
 }
 
+fn centered_content(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui)) {
+    StripBuilder::new(ui)
+        .size(Size::remainder())
+        .size(Size::exact(height))
+        .size(Size::remainder())
+        .vertical(|mut strip| {
+            strip.cell(|_| {});
+            strip.cell(|ui| {
+                ui.vertical_centered(add);
+            });
+            strip.cell(|_| {});
+        });
+}
+
 fn waiting(ui: &mut Ui, updating: bool, progress: Option<&ProgressView>) {
     let rect = ui.available_rect_before_wrap();
     theme::view_frame(ui).show(ui, |ui| {
         let min = (rect.size() - egui::vec2(24.0, 24.0)).max(egui::vec2(1.0, 1.0));
         ui.set_min_size(min);
-        ui.vertical_centered(|ui| {
-            ui.add_space((rect.height() * 0.35).max(24.0));
+        let height = if progress.is_some() { 54.0 } else { 28.0 };
+        centered_content(ui, height, |ui| {
             ui.label(
                 RichText::new(if updating {
                     "正在生成…"

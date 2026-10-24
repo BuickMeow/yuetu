@@ -210,6 +210,15 @@ pub fn faint(ui: &Ui) -> Color32 {
     }
 }
 
+/// Low-contrast track for the stage rail. Blend the normal inactive control
+/// fill toward the panel background so the rail reads as a groove instead of a
+/// raised button.
+pub fn rail_track(ui: &Ui) -> Color32 {
+    ui.visuals()
+        .panel_fill
+        .lerp_to_gamma(ui.visuals().widgets.inactive.bg_fill, 0.35)
+}
+
 pub fn accent(ui: &Ui) -> Color32 {
     if CUSTOM_THEME {
         ACCENT
