@@ -34,7 +34,7 @@ pub use color::Color;
 pub use convert::{
     ConversionConfig, ConversionResult, ConversionSeed, PaletteScope, StageTimings, convert,
     convert_frames_with_palette_and_progress, convert_frames_with_progress,
-    convert_seeded_with_progress, convert_with_progress,
+    convert_seeded_with_options, convert_seeded_with_progress, convert_with_progress,
 };
 pub use error::{Error, Result};
 pub use image::{

@@ -3,11 +3,12 @@
 use egui::{TextureFilter, TextureHandle, TextureOptions, TextureWrapMode};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use yuetu_core::resize::resize;
 use yuetu_core::{
     Color, ConversionConfig, ConversionResult, ImageSequence, IndexedImage, KeyMap, Palette,
-    ResizeAlgorithm, RgbaImage, load_image_sequence, normalize_degrees, quantize, rotate_image,
-    rotated_dimensions,
+    ResizeAlgorithm, RgbaImage, generate_notes, load_image_sequence, normalize_degrees, quantize,
+    rotate_image, rotated_dimensions,
 };
 
 use crate::widgets::midi_gpu::MidiGpuData;
@@ -101,10 +102,6 @@ impl SourceImage {
 
     pub fn palette_frames(&self) -> &[Arc<RgbaImage>] {
         &self.frames
-    }
-
-    pub fn rotation_deg(&self) -> f32 {
-        self.rotation_deg
     }
 
     pub fn interaction_image(&self) -> &RgbaImage {
@@ -493,6 +490,28 @@ impl Preview {
     /// key-map or palette stage. It uses the same resize algorithm as the
     /// final conversion so releasing the mouse does not change the picture.
     /// Notes and MIDI instances stay untouched until the final conversion.
+    /// Generate notes on demand from the cached indexed image. Used when a
+    /// preview was produced while the MIDI stage was not visible.
+    pub fn ensure_notes(&mut self, config: &ConversionConfig) -> yuetu_core::Result<()> {
+        if self.result.notes_generated {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let (notes, note_count_by_track) = generate_notes(
+            &self.result.indexed_image,
+            &self.result.keymap,
+            self.result.palette.len(),
+            config.max_note_length,
+            config.measure_from_image_start,
+        );
+        self.result.notes = notes;
+        self.result.note_count_by_track = note_count_by_track;
+        self.result.notes_generated = true;
+        self.result.timings.notes_ms = started.elapsed().as_secs_f32() * 1000.0;
+        self.midi_gpu = Arc::new(MidiGpuData::from_result(&self.result));
+        Ok(())
+    }
+
     /// Intermediate stage snapshot used while scrubbing frames on the
     /// key-map or palette stage. It uses the same resize algorithm as the
     /// final conversion so releasing the mouse does not change the picture.

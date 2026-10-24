@@ -123,6 +123,8 @@ pub struct ConversionResult {
     /// The nearest-palette-color index for every resized pixel.
     pub indexed_image: IndexedImage,
     pub note_count_by_track: Vec<usize>,
+    /// False when the preview deliberately skipped note generation.
+    pub notes_generated: bool,
     pub timings: StageTimings,
 }
 
@@ -218,6 +220,32 @@ pub fn convert_seeded_with_progress(
     shared_palette: Option<&Palette>,
     seed: Option<&ConversionSeed>,
     config: &ConversionConfig,
+    progress: Option<&dyn Progress>,
+    cancel: &AtomicBool,
+) -> Result<ConversionResult> {
+    convert_seeded_with_options(
+        image,
+        palette_frames,
+        delays_ms,
+        shared_palette,
+        seed,
+        config,
+        true,
+        progress,
+        cancel,
+    )
+}
+
+/// Like [`convert_seeded_with_progress`], but note generation can be deferred.
+#[allow(clippy::too_many_arguments)]
+pub fn convert_seeded_with_options(
+    image: &RgbaImage,
+    palette_frames: &[&RgbaImage],
+    delays_ms: &[u32],
+    shared_palette: Option<&Palette>,
+    seed: Option<&ConversionSeed>,
+    config: &ConversionConfig,
+    generate_notes: bool,
     progress: Option<&dyn Progress>,
     cancel: &AtomicBool,
 ) -> Result<ConversionResult> {
@@ -362,16 +390,24 @@ pub fn convert_seeded_with_progress(
     timings.quantize_ms = quantize_start.elapsed().as_secs_f32() * 1000.0;
 
     let notes_start = Instant::now();
-    let (notes, note_count_by_track) = generate_notes_with_progress(
-        &indexed,
-        &keymap,
-        palette.len(),
-        config.max_note_length,
-        config.measure_from_image_start,
-        cancel,
-        progress,
-    )?;
-    timings.notes_ms = notes_start.elapsed().as_secs_f32() * 1000.0;
+    let (notes, note_count_by_track) = if generate_notes {
+        generate_notes_with_progress(
+            &indexed,
+            &keymap,
+            palette.len(),
+            config.max_note_length,
+            config.measure_from_image_start,
+            cancel,
+            progress,
+        )?
+    } else {
+        (Vec::new(), vec![0usize; palette.len()])
+    };
+    timings.notes_ms = if generate_notes {
+        notes_start.elapsed().as_secs_f32() * 1000.0
+    } else {
+        0.0
+    };
     timings.total_ms = total_start.elapsed().as_secs_f32() * 1000.0;
 
     Ok(ConversionResult {
@@ -386,6 +422,7 @@ pub fn convert_seeded_with_progress(
         resized_image: resized,
         indexed_image: indexed,
         note_count_by_track,
+        notes_generated: generate_notes,
         timings,
     })
 }
@@ -665,6 +702,35 @@ mod tests {
         assert_eq!(second.keymap, first.keymap);
         assert_eq!(second.resized_size, first.resized_size);
         assert_ne!(second.notes.len(), first.notes.len());
+    }
+
+    #[test]
+    fn notes_can_be_deferred_without_losing_the_indexed_image() {
+        let image = solid_red(8, 8);
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 63,
+            palette_colors: 1,
+            ..ConversionConfig::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let result = convert_seeded_with_options(
+            &image,
+            &[],
+            &[],
+            None,
+            None,
+            &config,
+            false,
+            None,
+            &cancel,
+        )
+        .unwrap();
+
+        assert!(!result.notes_generated);
+        assert!(result.notes.is_empty());
+        assert_eq!(result.indexed_image.width, result.resized_size.0);
+        assert_eq!(result.note_count_by_track.len(), result.palette.len());
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use yuetu_core::{
     ColumnMapping, ConversionConfig, KeyFilter, MidiOutputConfig, PaletteScope, ResizeAlgorithm,
+    normalize_degrees,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -60,7 +61,7 @@ impl Settings {
             manual_palette: None,
             palette_scope: PaletteScope::AllFrames,
             resize: self.resize,
-            rotation_deg: self.rotation_deg,
+            rotation_deg: normalize_degrees(self.rotation_deg),
             target_height: self.target_height,
             max_note_length: if self.limit_note_length {
                 self.max_note_length.max(1)
@@ -95,5 +96,25 @@ impl Settings {
             return Err("PPQ 与 Ticks per Pixel 必须大于 0".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_wraps_when_converted() {
+        let settings = Settings {
+            rotation_deg: 360.0,
+            ..Settings::default()
+        };
+        assert_eq!(settings.conversion_config().rotation_deg, 0.0);
+
+        let settings = Settings {
+            rotation_deg: 725.0,
+            ..Settings::default()
+        };
+        assert_eq!(settings.conversion_config().rotation_deg, 5.0);
     }
 }

@@ -11,7 +11,7 @@ use std::thread;
 
 use yuetu_core::{
     ConversionConfig, ConversionResult, ConversionSeed, Error, Palette, RgbaImage, Stage,
-    convert_seeded_with_progress,
+    convert_seeded_with_options,
 };
 
 /// UI-facing progress snapshot.
@@ -119,6 +119,7 @@ impl JobRunner {
         shared_palette: Option<Palette>,
         seed: Option<ConversionSeed>,
         config: ConversionConfig,
+        generate_notes: bool,
     ) -> Result<u64, String> {
         self.cancel();
 
@@ -140,13 +141,14 @@ impl JobRunner {
                 };
 
                 let frame_refs: Vec<&RgbaImage> = palette_frames.iter().map(Arc::as_ref).collect();
-                let event = match convert_seeded_with_progress(
+                let event = match convert_seeded_with_options(
                     image.as_ref(),
                     &frame_refs,
                     &delays_ms,
                     shared_palette.as_ref(),
                     seed.as_ref(),
                     &config,
+                    generate_notes,
                     Some(&progress),
                     &worker_cancel,
                 ) {

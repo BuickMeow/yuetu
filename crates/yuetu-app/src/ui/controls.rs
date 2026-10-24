@@ -12,6 +12,7 @@ pub struct Action {
     pub export: bool,
     pub frame: Option<usize>,
     pub rotation: Option<f32>,
+    pub rotation_dragging: bool,
     pub reset: bool,
 }
 
@@ -80,11 +81,14 @@ pub fn show(
                     setting_row(ui, "旋转", |ui| {
                         let response = ui.add(
                             egui::DragValue::new(&mut settings.rotation_deg)
-                                .range(-180.0..=180.0)
                                 .speed(1.0)
                                 .max_decimals(1)
+                                .custom_formatter(|value, _| {
+                                    format!("{:.1}", value.rem_euclid(360.0))
+                                })
                                 .suffix("°"),
                         );
+                        action.rotation_dragging |= response.dragged();
                         if response.changed() {
                             action.rotation = Some(settings.rotation_deg);
                         }

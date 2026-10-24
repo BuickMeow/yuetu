@@ -190,6 +190,7 @@ UI: poll_jobs() → 状态栏 + 进度条 + 新 Preview
 - 转换支持 `ConversionSeed`：把上一份 `ConversionResult` 里的 keymap / palette / resized / indexed 按阶段配置是否变化填入，core 跳过仍然有效的上游阶段。
 - 例：只改音符长度时，palette/transform/quantize 全部复用，只重跑 notes；改颜色数时复用 transform；改旋转时只复用 palette。
 - `ConversionResult` 增加每阶段耗时，状态栏完成消息的悬停提示显示拆分；可运行 `cargo run --release -p yuetu-core --example benchmark` 看合成基准。
+- 音符按需生成：非 MIDI 阶段自动转换会跳过 notes；切换到 MIDI 或导出时从缓存的 indexed 图补生成。这样旋转/拖动期间不会为不可见的 MIDI 阶段工作。
 
 ### 5.4 主题开关
 
@@ -218,7 +219,7 @@ MIDI 阶段的坐标单位是“列 × pixel-tick”，不是屏幕像素；因�
 
 四个阶段由左侧卡片定义：
 
-1. `源图`：原始图像 + Photoshop 风格像素标尺；可设旋转角度（正值顺时针），标尺原点可切到左下角；
+1. `源图`：原始图像 + Photoshop 风格像素标尺；旋转输入可无限循环（显示 0–360°，内部连续累加），标尺原点可切到左下角；
 2. `键位映射`：按 `KeyMap::width()` 缩放后的图片，保持宽高比；
 3. `调色板`：`IndexedImage` 按调色板还原成索引色图，悬停显示索引和色号；动图始终使用所有帧的共享色板；
 4. `MIDI 生成`：钢琴卷帘音符；音符长度/切分设置也归入这一阶段。
@@ -309,6 +310,8 @@ eframe::Renderer::Wgpu
 - [x] 阶段耗时统计、状态悬停拆分、合成基准 example；
 - [x] 独立 `StageSnapshot` + interaction 分辨率图；
 - [x] 帧拖动期间的键位映射/调色板临时预览（跳过音符生成）；
+- [x] 旋转拖动/帧拖动期间暂停自动转换，松手后按阶段决定是否生成音符；
+- [x] 音符按需生成：仅在 MIDI 阶段或导出时补齐。
 - [x] 音符生成列投影、网格重触发预计算、非稳定排序；
 - [x] 原图旋转（任意角度，源图阶段使用显示分辨率预览，转换在 worker 中执行）；
 - [x] 标尺/悬停坐标原点切换（左上角 / 左下角）；

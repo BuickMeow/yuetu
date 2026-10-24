@@ -45,6 +45,7 @@ pub struct YuetuApp {
     frame_strip_last_frame: usize,
     frame_strip_mode: ui::frame_strip::FrameStripMode,
     frame_scrub_pending: bool,
+    rotation_scrub_pending: bool,
     checker_texture: egui::TextureHandle,
     gpu_target_format: eframe::wgpu::TextureFormat,
     source_view: View2D,
@@ -92,6 +93,7 @@ impl YuetuApp {
             frame_strip_last_frame: 0,
             frame_strip_mode: ui::frame_strip::FrameStripMode::default(),
             frame_scrub_pending: false,
+            rotation_scrub_pending: false,
             checker_texture,
             gpu_target_format,
             source_view: View2D::default(),
@@ -154,6 +156,7 @@ impl YuetuApp {
                 self.stage_hover = None;
                 self.frame_strip_last_frame = 0;
                 self.frame_scrub_pending = false;
+                self.rotation_scrub_pending = false;
                 self.source_view.reset_fit();
                 self.key_view.reset_fit();
                 self.palette_view.reset_fit();
@@ -213,6 +216,7 @@ impl YuetuApp {
         };
         let image = source.image.clone();
         let source_generation = self.source_generation;
+        let generate_notes = self.stage == PipelineStage::Midi;
         match self.jobs.start(
             image,
             palette_frames,
@@ -220,6 +224,7 @@ impl YuetuApp {
             shared_palette,
             seed,
             config.clone(),
+            generate_notes,
         ) {
             Ok(_) => {
                 self.job_config = Some(config);
@@ -393,10 +398,10 @@ impl YuetuApp {
         let Some(preview) = self.preview.as_mut() else {
             return;
         };
-        if preview.config != config {
+        if !palette_config_eq(&preview.config, &config) {
             return;
         }
-        // `display_image` is already rotated for the source stage. Avoid
+        // `interaction_image` is already rotated for the source stage. Avoid
         // rotating the full-resolution frame again just to rebuild a 128px
         // preview.
         let mut preview_config = config;
@@ -406,6 +411,26 @@ impl YuetuApp {
             preview.update_scrub_frame(ctx, &image, full_source_size, &preview_config, &palette)
         {
             tracing::warn!("failed to build scrub preview: {error}");
+        }
+    }
+
+    fn ensure_preview_notes(&mut self) -> bool {
+        let config = self.settings.conversion_config();
+        let Some(preview) = self.preview.as_mut() else {
+            return false;
+        };
+        if preview.result.notes_generated {
+            return true;
+        }
+        if preview.config != config || preview.source_revision != self.source_revision {
+            return false;
+        }
+        match preview.ensure_notes(&config) {
+            Ok(()) => true,
+            Err(error) => {
+                self.status = StatusMessage::error(format!("生成音符失败：{error}"));
+                false
+            }
         }
     }
 
@@ -467,13 +492,17 @@ impl YuetuApp {
                     }
                     if config == current && source_revision == self.source_revision {
                         let timings = result.timings;
-                        self.status = StatusMessage::success(format!(
-                            "生成完成：{} 音符 · {} 音轨 · 用时 {:.1} ms",
-                            result.note_count(),
-                            result.track_count(),
-                            elapsed.as_secs_f64() * 1000.0
-                        ))
-                        .with_detail(format!(
+                        let text = if result.notes_generated {
+                            format!(
+                                "生成完成：{} 音符 · {} 音轨 · 用时 {:.1} ms",
+                                result.note_count(),
+                                result.track_count(),
+                                elapsed.as_secs_f64() * 1000.0
+                            )
+                        } else {
+                            "生成完成：预览已更新 · 音符按需生成".to_owned()
+                        };
+                        self.status = StatusMessage::success(text).with_detail(format!(
                             "调色板 {:.1} ms\n键位映射/缩放 {:.1} ms\n量化 {:.1} ms\n音符 {:.1} ms",
                             timings.palette_ms,
                             timings.transform_ms,
@@ -492,6 +521,14 @@ impl YuetuApp {
                                 self.key_view.reset_fit();
                                 self.palette_view.reset_fit();
                                 self.midi_view.reset_fit();
+                            }
+                            if self.stage == PipelineStage::Midi
+                                && !self
+                                    .preview
+                                    .as_ref()
+                                    .is_some_and(|preview| preview.result.notes_generated)
+                            {
+                                self.ensure_preview_notes();
                             }
                         }
                         Err(error) => {
@@ -537,6 +574,11 @@ impl YuetuApp {
             self.status = StatusMessage::warning("预览正在更新，请稍候");
             return;
         }
+        if !self.ensure_preview_notes() {
+            self.status = StatusMessage::warning("音符正在生成，请稍候");
+            return;
+        }
+        let preview = self.preview.as_ref().expect("preview checked above");
 
         let default_name = self
             .source
@@ -701,6 +743,11 @@ impl eframe::App for YuetuApp {
             if stage != self.stage {
                 self.stage = stage;
                 self.stage_hover = None;
+                if stage == PipelineStage::Midi {
+                    if !self.ensure_preview_notes() && !self.jobs.is_running() {
+                        self.schedule_auto_conversion(&ctx, Duration::ZERO);
+                    }
+                }
                 acted = true;
             }
         }
@@ -787,20 +834,31 @@ impl eframe::App for YuetuApp {
             self.frame_scrub_pending = true;
         }
         if let Some(degrees) = controls_action.rotation {
+            let live = controls_action.rotation_dragging
+                || ctx.input(|input| input.pointer.primary_down());
             if let Some(source) = self.source.as_mut() {
                 match source.set_rotation(&ctx, degrees) {
                     Ok(true) => {
-                        self.settings.rotation_deg = source.rotation_deg();
                         self.source_revision = self.source_revision.wrapping_add(1);
                         self.stage_hover = None;
                         self.source_view.reset_fit();
-                        self.status = StatusMessage::info("正在更新预览…");
-                        self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+                        if live {
+                            self.suspend_conversion_for_scrub();
+                            self.rotation_scrub_pending = true;
+                            self.status = StatusMessage::info("调整旋转…");
+                            if matches!(self.stage, PipelineStage::KeyMap | PipelineStage::Palette)
+                            {
+                                self.update_scrub_preview(&ctx);
+                            }
+                        } else {
+                            self.rotation_scrub_pending = false;
+                            self.status = StatusMessage::info("正在更新预览…");
+                            self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+                        }
                         acted = true;
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        self.settings.rotation_deg = source.rotation_deg();
                         self.status = StatusMessage::error(format!("旋转失败：{error}"));
                     }
                 }
@@ -849,6 +907,12 @@ impl eframe::App for YuetuApp {
 
         if self.frame_scrub_pending && !ctx.input(|input| input.pointer.primary_down()) {
             self.frame_scrub_pending = false;
+            self.status = StatusMessage::info("正在更新预览…");
+            self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+            acted = true;
+        }
+        if self.rotation_scrub_pending && !ctx.input(|input| input.pointer.primary_down()) {
+            self.rotation_scrub_pending = false;
             self.status = StatusMessage::info("正在更新预览…");
             self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
             acted = true;
