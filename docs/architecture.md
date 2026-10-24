@@ -153,6 +153,8 @@ status_bar::Action  { set_zoom_percent, fit_width }
 
 设置项统一使用“名称在左、控件右对齐”的行布局，卡片标题与卡片级操作也使用同一行。`controls::show` 返回四个卡片的屏幕中心，供最左侧图标轨道吸附。
 
+底部状态栏使用 `egui_extras::StripBuilder` 固定列宽（阶段名 80px、缩放编辑器 64px、循环按钮 64px），行高固定为 26px。底部面板本身不再加 top margin：中央面板已经有 8px bottom margin，避免两段同色 padding 叠加成 16px 的视觉空隙。
+
 转换不再由面板按钮触发。`app.rs` 在每帧 UI 结束后比较 `ConversionConfig`：只要有变化，就经过 80 ms debounce 启动后台任务；GIF/WebP 选帧同样会递增 `source_revision` 并触发更新。拖拽滑杆时不会每帧重启任务，但松手后立即更新。
 
 ### 5.3 后台转换任务

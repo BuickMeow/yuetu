@@ -112,17 +112,26 @@ pub fn panel_frame(ui: &Ui, kind: PanelKind) -> Frame {
     if !CUSTOM_THEME {
         return match kind {
             PanelKind::Central => Frame::central_panel(ui.style()),
-            PanelKind::Bottom => {
-                Frame::side_top_panel(ui.style()).inner_margin(Margin::symmetric(8, 8))
-            }
+            PanelKind::Bottom => Frame::side_top_panel(ui.style()).inner_margin(Margin {
+                left: 8,
+                right: 8,
+                // The central panel already contributes its 8px bottom
+                // margin directly above this panel. A top margin here would
+                // visually double that gap.
+                top: 0,
+                bottom: 8,
+            }),
             PanelKind::Side => Frame::side_top_panel(ui.style()),
         };
     }
 
     match kind {
-        PanelKind::Bottom => Frame::new()
-            .fill(BG_APP)
-            .inner_margin(Margin::symmetric(12, 12)),
+        PanelKind::Bottom => Frame::new().fill(BG_APP).inner_margin(Margin {
+            left: 12,
+            right: 12,
+            top: 0,
+            bottom: 12,
+        }),
         PanelKind::Side => Frame::new().fill(BG_PANEL).inner_margin(Margin::same(12)),
         PanelKind::Central => Frame::new().fill(BG_PANEL).inner_margin(Margin::same(10)),
     }

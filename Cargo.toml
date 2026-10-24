@@ -16,6 +16,7 @@ yuetu-core = { path = "crates/yuetu-core" }
 
 bytemuck = { version = "1", features = ["derive"] }
 egui = "0.37.0"
+egui_extras = "0.37.0"
 egui_material_icons = { version = "0.9", features = ["outline"] }
 eframe = { version = "0.37.0", default-features = false, features = [
     "wgpu",
