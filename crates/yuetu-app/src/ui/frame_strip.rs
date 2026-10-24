@@ -1,40 +1,57 @@
 //! Horizontal frame browser shown below the main stage for animations.
 //!
-//! The strip is intentionally lightweight: only the visible cells ask
-//! `SourceImage` for a thumbnail, so a 1000-frame GIF does not upload 1000
-//! textures when it is opened. Cells are fixed-width like a timeline, and the
-//! thumbnail keeps its aspect ratio inside each cell.
+//! Small animations use thumbnails; long sequences switch to a compact
+//! timeline with adaptive frame numbers and a playhead. This keeps a
+//! 5000-frame sequence usable instead of allocating 5000 thumbnail cells.
 
 use egui::scroll_area::ScrollBarVisibility;
-use egui::{Align2, Color32, FontId, Rect, Sense, Ui};
+use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui};
 
 use crate::state::SourceImage;
 use crate::theme;
 
-const CELL_WIDTH: f32 = 64.0;
-const CELL_HEIGHT: f32 = 56.0;
-const CELL_GAP: f32 = 4.0;
-const STRIDE: f32 = CELL_WIDTH + CELL_GAP;
+const THUMBNAIL_LIMIT: usize = 120;
+const THUMBNAIL_CELL_WIDTH: f32 = 64.0;
+const THUMBNAIL_CELL_HEIGHT: f32 = 56.0;
+const THUMBNAIL_CELL_GAP: f32 = 4.0;
+const THUMBNAIL_STRIDE: f32 = THUMBNAIL_CELL_WIDTH + THUMBNAIL_CELL_GAP;
 
-/// Returns the frame clicked in this frame.
+const TIMELINE_FRAME_WIDTH: f32 = 10.0;
+const TIMELINE_HEIGHT: f32 = 56.0;
+const TIMELINE_RULER_HEIGHT: f32 = 18.0;
+
+/// Returns the frame clicked or dragged to in this frame.
 pub fn show(ui: &mut Ui, source: &mut SourceImage, last_selected: &mut usize) -> Option<usize> {
     let frame_count = source.frame_count();
     if frame_count <= 1 {
         return None;
     }
 
-    let total_width = frame_count as f32 * STRIDE - CELL_GAP;
-    // Use an explicit bar for long strips instead of relying on the
-    // "visible when needed" heuristic; short animations get no bar at all.
-    let scroll_bar_visibility = if total_width > ui.available_width() {
-        ScrollBarVisibility::AlwaysVisible
-    } else {
-        ScrollBarVisibility::AlwaysHidden
-    };
     let selected = source.frame_index();
     let scroll_to_selected = selected != *last_selected;
     *last_selected = selected;
-    let selected_before = selected;
+
+    let chosen = if frame_count > THUMBNAIL_LIMIT {
+        show_timeline(ui, frame_count, selected, scroll_to_selected)
+    } else {
+        show_thumbnails(ui, source, selected, scroll_to_selected)
+    };
+
+    if let Some(index) = chosen {
+        *last_selected = index;
+    }
+    chosen
+}
+
+fn show_thumbnails(
+    ui: &mut Ui,
+    source: &mut SourceImage,
+    selected: usize,
+    scroll_to_selected: bool,
+) -> Option<usize> {
+    let frame_count = source.frame_count();
+    let total_width = frame_count as f32 * THUMBNAIL_STRIDE - THUMBNAIL_CELL_GAP;
+    let scroll_bar_visibility = scroll_bar_visibility(ui, total_width);
     let mut chosen = None;
 
     egui::ScrollArea::horizontal()
@@ -42,16 +59,18 @@ pub fn show(ui: &mut Ui, source: &mut SourceImage, last_selected: &mut usize) ->
         .auto_shrink([false, true])
         .scroll_bar_visibility(scroll_bar_visibility)
         .show_viewport(ui, |ui, viewport| {
-            let (content_rect, _) =
-                ui.allocate_exact_size(egui::vec2(total_width, CELL_HEIGHT), Sense::hover());
+            let (content_rect, _) = ui.allocate_exact_size(
+                egui::vec2(total_width, THUMBNAIL_CELL_HEIGHT),
+                Sense::hover(),
+            );
 
-            let first = ((viewport.min.x / STRIDE).floor() as usize).min(frame_count);
-            let last = ((viewport.max.x / STRIDE).ceil() as usize).min(frame_count);
+            let first = ((viewport.min.x / THUMBNAIL_STRIDE).floor() as usize).min(frame_count);
+            let last = ((viewport.max.x / THUMBNAIL_STRIDE).ceil() as usize).min(frame_count);
 
             for index in first..last {
                 let cell = Rect::from_min_size(
-                    content_rect.min + egui::vec2(index as f32 * STRIDE, 0.0),
-                    egui::vec2(CELL_WIDTH, CELL_HEIGHT),
+                    content_rect.min + egui::vec2(index as f32 * THUMBNAIL_STRIDE, 0.0),
+                    egui::vec2(THUMBNAIL_CELL_WIDTH, THUMBNAIL_CELL_HEIGHT),
                 );
                 let response =
                     ui.interact(cell, ui.scope_id().with(("frame", index)), Sense::click());
@@ -59,7 +78,7 @@ pub fn show(ui: &mut Ui, source: &mut SourceImage, last_selected: &mut usize) ->
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
 
-                let is_selected = index == selected_before;
+                let is_selected = index == selected;
                 let background = if response.hovered() {
                     ui.visuals().widgets.hovered.weak_bg_fill
                 } else {
@@ -113,20 +132,167 @@ pub fn show(ui: &mut Ui, source: &mut SourceImage, last_selected: &mut usize) ->
                 }
             }
 
-            // If the current frame changed outside the strip (for example via
-            // the frame DragValue), bring it into view. A frame clicked inside
-            // the strip is already visible, so it does not jump.
-            if scroll_to_selected && (selected_before < first || selected_before >= last) {
+            if scroll_to_selected && (selected < first || selected >= last) {
                 let selected_rect = Rect::from_min_size(
-                    content_rect.min + egui::vec2(selected_before as f32 * STRIDE, 0.0),
-                    egui::vec2(CELL_WIDTH, CELL_HEIGHT),
+                    content_rect.min + egui::vec2(selected as f32 * THUMBNAIL_STRIDE, 0.0),
+                    egui::vec2(THUMBNAIL_CELL_WIDTH, THUMBNAIL_CELL_HEIGHT),
                 );
                 ui.scroll_to_rect(selected_rect, Some(egui::Align::Center));
             }
         });
 
-    if let Some(index) = chosen {
-        *last_selected = index;
-    }
     chosen
+}
+
+fn show_timeline(
+    ui: &mut Ui,
+    frame_count: usize,
+    selected: usize,
+    scroll_to_selected: bool,
+) -> Option<usize> {
+    let total_width = frame_count as f32 * TIMELINE_FRAME_WIDTH;
+    let scroll_bar_visibility = scroll_bar_visibility(ui, total_width);
+    let mut chosen = None;
+
+    egui::ScrollArea::horizontal()
+        .id_salt("frame_timeline_scroll")
+        .auto_shrink([false, true])
+        .scroll_bar_visibility(scroll_bar_visibility)
+        .show_viewport(ui, |ui, viewport| {
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(total_width, TIMELINE_HEIGHT),
+                Sense::click_and_drag(),
+            );
+            let painter = ui.painter();
+            painter.rect_filled(rect, 0.0, theme::view_bg(ui));
+
+            let ruler = Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.right(), rect.top() + TIMELINE_RULER_HEIGHT),
+            );
+            let track = Rect::from_min_max(egui::pos2(rect.left(), ruler.bottom()), rect.max);
+            painter.rect_filled(ruler, 0.0, ui.visuals().panel_fill);
+            painter.rect_filled(track, 0.0, theme::view_bg(ui));
+
+            let first = ((viewport.min.x / TIMELINE_FRAME_WIDTH).floor() as usize).min(frame_count);
+            let last = ((viewport.max.x / TIMELINE_FRAME_WIDTH).ceil() as usize).min(frame_count);
+            let label_step = timeline_label_step(TIMELINE_FRAME_WIDTH);
+            let tick_color = theme::faint(ui).gamma_multiply(0.55);
+            let label_color = theme::faint(ui);
+            let separator = Color32::from_white_alpha(14);
+
+            for index in first..last {
+                let x = rect.left() + index as f32 * TIMELINE_FRAME_WIDTH;
+                let cell = Rect::from_min_max(
+                    egui::pos2(x, track.top()),
+                    egui::pos2(x + TIMELINE_FRAME_WIDTH, track.bottom()),
+                );
+
+                // Alternate five-frame blocks, like a compressed timeline.
+                if (index / 5) % 2 == 0 {
+                    painter.rect_filled(cell, 0.0, ui.visuals().faint_bg_color);
+                }
+                painter.line_segment(
+                    [egui::pos2(x, track.top()), egui::pos2(x, track.bottom())],
+                    Stroke::new(1.0, separator),
+                );
+
+                let major = (index + 1) % label_step == 0;
+                painter.line_segment(
+                    [
+                        egui::pos2(x, ruler.bottom() - if major { 7.0 } else { 4.0 }),
+                        egui::pos2(x, ruler.bottom()),
+                    ],
+                    Stroke::new(1.0, tick_color),
+                );
+                if major {
+                    painter.text(
+                        egui::pos2(x + 3.0, ruler.top() + 2.0),
+                        Align2::LEFT_TOP,
+                        format!("{}", index + 1),
+                        FontId::monospace(9.0),
+                        label_color,
+                    );
+                }
+            }
+
+            let selected_x = rect.left() + selected as f32 * TIMELINE_FRAME_WIDTH;
+            let selected_cell = Rect::from_min_max(
+                egui::pos2(selected_x, track.top()),
+                egui::pos2(selected_x + TIMELINE_FRAME_WIDTH, track.bottom()),
+            );
+            painter.rect_filled(selected_cell, 0.0, ui.visuals().selection.bg_fill);
+
+            let playhead_x = selected_x + TIMELINE_FRAME_WIDTH * 0.5;
+            let playhead_color = ui.visuals().selection.stroke.color;
+            painter.line_segment(
+                [
+                    egui::pos2(playhead_x, ruler.top()),
+                    egui::pos2(playhead_x, track.bottom()),
+                ],
+                Stroke::new(1.0, playhead_color),
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(playhead_x - 4.0, ruler.top()),
+                    egui::pos2(playhead_x + 4.0, ruler.top()),
+                    egui::pos2(playhead_x, ruler.top() + 6.0),
+                ],
+                playhead_color,
+                Stroke::NONE,
+            ));
+
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if (response.clicked() || response.dragged())
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                let index = ((pointer.x - rect.left()) / TIMELINE_FRAME_WIDTH)
+                    .floor()
+                    .clamp(0.0, frame_count.saturating_sub(1) as f32)
+                    as usize;
+                chosen = Some(index);
+            }
+
+            if scroll_to_selected && (selected < first || selected >= last) {
+                let selected_rect = Rect::from_min_size(
+                    egui::pos2(selected_x, rect.top()),
+                    egui::vec2(TIMELINE_FRAME_WIDTH, TIMELINE_HEIGHT),
+                );
+                ui.scroll_to_rect(selected_rect, Some(egui::Align::Center));
+            }
+        });
+
+    chosen
+}
+
+fn timeline_label_step(frame_width: f32) -> usize {
+    let target = (44.0 / frame_width.max(1.0)).ceil() as usize;
+    for step in [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000] {
+        if step >= target {
+            return step;
+        }
+    }
+    target.max(1)
+}
+
+fn scroll_bar_visibility(ui: &Ui, content_width: f32) -> ScrollBarVisibility {
+    if content_width > ui.available_width() {
+        ScrollBarVisibility::AlwaysVisible
+    } else {
+        ScrollBarVisibility::AlwaysHidden
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeline_labels_stay_readable_at_any_scale() {
+        assert_eq!(timeline_label_step(10.0), 5);
+        assert_eq!(timeline_label_step(1.0), 50);
+        assert_eq!(timeline_label_step(0.0), 50);
+    }
 }
