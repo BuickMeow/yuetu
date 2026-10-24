@@ -4,7 +4,9 @@
 //! cursor. Mouse-wheel lines and Ctrl/Cmd+scroll zoom, drag pans, arrows pan,
 //! double-click fits.
 
-use egui::{CursorIcon, Event, Key, MouseWheelUnit, Pos2, Rect, Response, Sense, Ui, Vec2};
+use egui::{
+    CursorIcon, Event, Key, MouseWheelSource, MouseWheelUnit, Pos2, Rect, Response, Sense, Ui, Vec2,
+};
 
 const MIN_ABSOLUTE_SCALE: f64 = 0.01;
 const MAX_ABSOLUTE_SCALE: f64 = 64.0;
@@ -14,6 +16,17 @@ const MAX_RELATIVE_ZOOM: f64 = 120.0;
 enum ScrollSource {
     Wheel,
     Touchpad,
+}
+
+fn scroll_source_for(unit: MouseWheelUnit, source: MouseWheelSource) -> Option<ScrollSource> {
+    match source {
+        MouseWheelSource::Wheel => Some(ScrollSource::Wheel),
+        MouseWheelSource::Trackpad | MouseWheelSource::Momentum => Some(ScrollSource::Touchpad),
+        MouseWheelSource::Unknown => match unit {
+            MouseWheelUnit::Line | MouseWheelUnit::Page => Some(ScrollSource::Wheel),
+            MouseWheelUnit::Point => None,
+        },
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -33,6 +46,9 @@ pub struct View2D {
     last_content_size: Vec2,
     scroll_source: Option<ScrollSource>,
     zoom_anchor: Option<ZoomAnchor>,
+    /// Set while a trackpad pinch is active (and until the scroll settles), so
+    /// residual scroll deltas cannot pan the image immediately after zooming.
+    pinch_zoom_gesture: bool,
 }
 
 impl Default for View2D {
@@ -47,6 +63,7 @@ impl Default for View2D {
             last_content_size: Vec2::splat(1.0),
             scroll_source: None,
             zoom_anchor: None,
+            pinch_zoom_gesture: false,
         }
     }
 }
@@ -57,6 +74,7 @@ impl View2D {
         self.pan = Vec2::ZERO;
         self.fit_pending = true;
         self.zoom_anchor = None;
+        self.pinch_zoom_gesture = false;
     }
 
     /// Current absolute zoom in percent, where 100% means one image pixel per
@@ -135,40 +153,46 @@ impl View2D {
         }
 
         if response.hovered() {
-            let (scroll, pinch, has_wheel, has_point, wheel_y) = ui.input(|input| {
-                // Trackpads report Point deltas; a classic mouse wheel reports
-                // Line/Page. Remember the gesture source across frames: egui
-                // smooths scroll over several frames, and a wheel must never
-                // become a pan just because its event frame has passed.
-                let mut has_wheel = false;
-                let mut has_point = false;
+            let (scroll, pinch, event_source, wheel_y) = ui.input(|input| {
+                // Use the backend's wheel source instead of the delta unit:
+                // macOS can report a physical wheel as Point deltas. A wheel
+                // must zoom even when its unit is Point, and a trackpad must
+                // pan even when its unit is Line/Page.
+                let mut event_source = None;
                 let mut wheel_y = 0.0;
                 for event in &input.events {
-                    if let Event::MouseWheel { unit, delta, .. } = event {
-                        match unit {
-                            MouseWheelUnit::Line | MouseWheelUnit::Page => {
-                                has_wheel = true;
+                    if let Event::MouseWheel {
+                        unit,
+                        delta,
+                        source,
+                        ..
+                    } = event
+                    {
+                        if let Some(source) = scroll_source_for(*unit, *source) {
+                            event_source = Some(source);
+                            if source == ScrollSource::Wheel {
                                 wheel_y += delta.y;
                             }
-                            MouseWheelUnit::Point => has_point = true,
                         }
                     }
                 }
                 (
                     input.smooth_scroll_delta,
                     input.zoom_delta(),
-                    has_wheel,
-                    has_point,
+                    event_source,
                     wheel_y,
                 )
             });
 
-            if has_wheel {
-                self.scroll_source = Some(ScrollSource::Wheel);
-            } else if has_point {
-                self.scroll_source = Some(ScrollSource::Touchpad);
+            if let Some(source) = event_source {
+                self.scroll_source = Some(source);
             } else if scroll == Vec2::ZERO && (pinch - 1.0).abs() <= 1e-4 {
                 self.scroll_source = None;
+            }
+
+            let pinching = (pinch - 1.0).abs() > 1e-4;
+            if pinching {
+                self.pinch_zoom_gesture = true;
             }
 
             if self.scroll_source == Some(ScrollSource::Wheel) {
@@ -181,11 +205,10 @@ impl View2D {
                 self.zoom_at(viewport, fit, response.hover_pos(), factor);
             } else {
                 // Trackpad two-finger scroll: move the content in both axes.
-                // While a pinch is active, do not also apply scroll as pan:
-                // some devices emit both and that combination is exactly the
-                // "zoom + vertical scroll" bug at high zoom.
-                let zooming = (pinch - 1.0).abs() > 1e-4;
-                if !zooming {
+                // Suppress pan for the whole pinch gesture, including the
+                // smoothed tail after the pinch has ended; otherwise a tiny
+                // residual scroll shifts the image right after zooming.
+                if !pinching && !self.pinch_zoom_gesture {
                     self.pan += scroll;
                 }
                 self.zoom_at(viewport, fit, response.hover_pos(), pinch);
@@ -194,7 +217,8 @@ impl View2D {
             if (pinch - 1.0).abs() <= 1e-4 && self.scroll_source != Some(ScrollSource::Wheel) {
                 self.zoom_anchor = None;
             }
-            if self.scroll_source.is_none() && !has_wheel && !has_point {
+            if !pinching && scroll == Vec2::ZERO && self.scroll_source.is_none() {
+                self.pinch_zoom_gesture = false;
                 self.zoom_anchor = None;
             }
 
@@ -340,6 +364,45 @@ mod tests {
         assert!(
             (before - after).length() < 0.01,
             "anchor drifted from {before:?} to {after:?}"
+        );
+    }
+
+    #[test]
+    fn wheel_source_wins_over_delta_unit() {
+        assert_eq!(
+            scroll_source_for(MouseWheelUnit::Point, MouseWheelSource::Wheel),
+            Some(ScrollSource::Wheel)
+        );
+        assert_eq!(
+            scroll_source_for(MouseWheelUnit::Line, MouseWheelSource::Trackpad),
+            Some(ScrollSource::Touchpad)
+        );
+        assert_eq!(
+            scroll_source_for(MouseWheelUnit::Point, MouseWheelSource::Trackpad),
+            Some(ScrollSource::Touchpad)
+        );
+        assert_eq!(
+            scroll_source_for(MouseWheelUnit::Line, MouseWheelSource::Unknown),
+            Some(ScrollSource::Wheel)
+        );
+        assert_eq!(
+            scroll_source_for(MouseWheelUnit::Point, MouseWheelSource::Unknown),
+            None
+        );
+    }
+
+    #[test]
+    fn zooming_at_the_content_center_does_not_translate() {
+        let mut view = View2D::default();
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0));
+        let pointer = viewport.center();
+
+        view.zoom_at(viewport, 0.5, Some(pointer), 1.25);
+
+        assert!(
+            view.pan.length() < 1e-5,
+            "center zoom moved pan: {:?}",
+            view.pan
         );
     }
 

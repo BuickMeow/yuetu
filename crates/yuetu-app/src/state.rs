@@ -365,9 +365,12 @@ fn texture_color_image(
 }
 
 fn display_texture_options() -> TextureOptions {
-    // Crisp texels when zoomed in, smooth reduction when zoomed out.
+    // Use one filter on both sides of the 1:1 line. With nearest
+    // magnification, Retina displays visibly switch from crisp texels to
+    // filtered minification at 50%; that looks like an LOD/thumbnail change
+    // even though the full texture is still bound.
     TextureOptions {
-        magnification: TextureFilter::Nearest,
+        magnification: TextureFilter::Linear,
         minification: TextureFilter::Linear,
         wrap_mode: TextureWrapMode::ClampToEdge,
         mipmap_mode: None,
