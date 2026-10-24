@@ -186,8 +186,10 @@ UI: poll_jobs() → 状态栏 + 进度条 + 新 Preview
 - 同一时间只跑一个任务；启动新任务会取消旧任务，并按 job id 丢弃旧事件；
 - 参数变化会自动把新任务排到 80 ms 后；旧结果即使先返回，也只会短暂作为占位，更新状态由进度条表示，不再出现“预览已过期”；
 - 导出的前提是 `Preview.config == 当前 ConversionConfig` 且 `Preview.source_revision == 当前 source_revision`，避免在自动更新或切帧途中导出旧结果。
-- 共享调色板在 UI 侧缓存：key 是 `source_generation + palette_colors`。切帧、旋转不会让“所有帧”色板失效，所以时间轴拖动时只重跑当前帧的缩放/量化/音符；只有换图或改色板设置才重新聚类。
-- 四个阶段仍然在同一个后台任务里顺序执行，`ConversionResult` 是原子快照；目前缓存的是跨阶段共享的调色板，尚未做 resized/indexed/notes 的分段缓存。
+- 共享调色板在 UI 侧缓存：key 是 `source_generation + palette_colors`。切帧、旋转不会让“所有帧”色板失效。
+- 转换支持 `ConversionSeed`：把上一份 `ConversionResult` 里的 keymap / palette / resized / indexed 按阶段配置是否变化填入，core 跳过仍然有效的上游阶段。
+- 例：只改音符长度时，palette/transform/quantize 全部复用，只重跑 notes；改颜色数时复用 transform；改旋转时只复用 palette。
+- `ConversionResult` 增加每阶段耗时，状态栏完成消息的悬停提示显示拆分；可运行 `cargo run --release -p yuetu-core --example benchmark` 看合成基准。
 
 ### 5.4 主题开关
 
@@ -235,14 +237,41 @@ MIDI 阶段的坐标单位是“列 × pixel-tick”，不是屏幕像素；因�
 
 - 默认显示缩略图：每帧一个固定宽度 cell，显示缩略图、帧号；
 - 右侧模式按钮可切换到紧凑时间轴，显示连续帧刻度、每 5/10/... 帧的编号、当前帧色带和播放头；再点一次切回缩略图；切换模式后自动滚到当前帧；
-- 两种模式都支持点击选帧；时间轴还支持按住拖动播放头扫帧；拖动期间源图始终更新，键位映射/调色板阶段会用当前缩放算法重建临时图像（不跑完整转换），有旋转时直接复用已经旋转好的显示预览，MIDI 等最终帧松手后再更新；
+- 两种模式都支持点击选帧；时间轴还支持按住拖动播放头扫帧；拖动期间源图始终更新，键位映射/调色板阶段从低分辨率 interaction 图重建临时快照（不跑完整转换），MIDI 等最终帧松手后再更新；
 - 当前帧不画边框，用底部/整格色带和播放头区分；
 - 帧数超出宽度时显示横向滚动条；短动画不显示滚动条；
 - 缩略图按需生成（只生成可见 cell），旋转变化时清空缓存；
 - 外部选帧（例如 DragValue 跳到第 3000 帧）时，帧条自动把该帧滚入视野；
 - 点击和拖动都走 `select_source_frame()`，会递增 `source_revision` 并自动重生成预览。
 
-### 5.8 HiDPI
+### 5.8 性能架构
+
+阶段之间用显式的 key 关系复用，而不是在 UI 里散落临时布尔值：
+
+```text
+SourceKey    = source_generation + frame_index
+PaletteKey   = source_sequence_generation + palette_colors
+TransformKey = SourceKey + keymap + rotation + target_height + resize
+IndexedKey   = TransformKey + PaletteKey
+NotesKey     = IndexedKey + note settings
+```
+
+分辨率分三层：
+
+- `Original`：全分辨率，只允许 worker / 导出使用；
+- `Display`：源图显示，受 GPU 纹理上限约束；
+- `Interaction`：键位映射/调色板拖动用的低分辨率图（当前上限 1024），不碰全图；
+- 最终帧松手后再跑全分辨率 conversion。
+
+临时预览存成独立的 `StageSnapshot`，不写回 `ConversionResult`。这样键位映射/调色板可以单独更新，而 MIDI/导出仍只读完整结果。
+
+每个阶段记录 `palette_ms / transform_ms / quantize_ms / notes_ms / total_ms`；完成状态悬停可看拆分。基准入口：
+
+```text
+cargo run --release -p yuetu-core --example benchmark
+```
+
+### 5.9 HiDPI
 
 eframe / egui / wgpu 已经处理窗口的 `pixels_per_point`：布局、字体、描边、标尺、命中区和四个 `View2D` 全部使用逻辑点，上传给 GPU 的纹理使用图像实际像素。唯一相关的是从 `ctx.input(|i| i.max_texture_side)` 读取纹理上限，避免超过后端限制。Retina 2x 下已验证。
 
@@ -276,6 +305,9 @@ eframe::Renderer::Wgpu
 - [x] 主视图下方横向帧条：缩略图/时间轴切换按钮、点击/拖动选帧、当前帧色带、横向滚动、按需生成缩略图；
 - [x] 多帧共享调色板：按帧延迟加权直方图 + 加权 K-Means++；
 - [x] 共享调色板缓存：切帧/旋转不重复聚类；
+- [x] 阶段 key 缓存 / `ConversionSeed`：只改音符时只重跑音符；
+- [x] 阶段耗时统计、状态悬停拆分、合成基准 example；
+- [x] 独立 `StageSnapshot` + interaction 分辨率图；
 - [x] 帧拖动期间的键位映射/调色板临时预览（跳过音符生成）；
 - [x] 音符生成列投影、网格重触发预计算、非稳定排序；
 - [x] 原图旋转（任意角度，源图阶段使用显示分辨率预览，转换在 worker 中执行）；

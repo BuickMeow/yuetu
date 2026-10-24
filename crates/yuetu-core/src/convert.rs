@@ -5,6 +5,7 @@
 //! the result. Each stage remains independently testable.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::color::Color;
 use crate::error::{Error, Result};
@@ -79,6 +80,32 @@ impl Default for ConversionConfig {
     }
 }
 
+/// Artifacts that can be reused when only a downstream stage changed.
+///
+/// The caller is responsible for only filling fields whose upstream keys are
+/// unchanged. This keeps the core stateless while still allowing the app to
+/// turn the pipeline into a keyed stage cache.
+#[derive(Clone, Debug, Default)]
+pub struct ConversionSeed {
+    pub keymap: Option<KeyMap>,
+    pub palette: Option<Palette>,
+    pub resized: Option<RgbaImage>,
+    pub resized_size: Option<(u32, u32)>,
+    pub source_size: Option<(u32, u32)>,
+    pub indexed: Option<IndexedImage>,
+}
+
+/// Per-stage wall-clock timings. They are diagnostic data, not part of the
+/// conversion contract.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StageTimings {
+    pub palette_ms: f32,
+    pub transform_ms: f32,
+    pub quantize_ms: f32,
+    pub notes_ms: f32,
+    pub total_ms: f32,
+}
+
 /// The single snapshot the UI/preview and the MIDI writer consume.
 #[derive(Clone, Debug)]
 pub struct ConversionResult {
@@ -96,6 +123,7 @@ pub struct ConversionResult {
     /// The nearest-palette-color index for every resized pixel.
     pub indexed_image: IndexedImage,
     pub note_count_by_track: Vec<usize>,
+    pub timings: StageTimings,
 }
 
 impl ConversionResult {
@@ -166,6 +194,34 @@ pub fn convert_frames_with_palette_and_progress(
     progress: Option<&dyn Progress>,
     cancel: &AtomicBool,
 ) -> Result<ConversionResult> {
+    convert_seeded_with_progress(
+        image,
+        palette_frames,
+        delays_ms,
+        shared_palette,
+        None,
+        config,
+        progress,
+        cancel,
+    )
+}
+
+/// Convert with optional reusable artifacts from upstream stages.
+///
+/// The caller is responsible for matching the seed against `config` and the
+/// source revision. Invalid seeds only affect quality, not memory safety.
+#[allow(clippy::too_many_arguments)]
+pub fn convert_seeded_with_progress(
+    image: &RgbaImage,
+    palette_frames: &[&RgbaImage],
+    delays_ms: &[u32],
+    shared_palette: Option<&Palette>,
+    seed: Option<&ConversionSeed>,
+    config: &ConversionConfig,
+    progress: Option<&dyn Progress>,
+    cancel: &AtomicBool,
+) -> Result<ConversionResult> {
+    let total_start = Instant::now();
     if image.is_empty() {
         return Err(Error::InvalidImage("源图为空".into()));
     }
@@ -173,26 +229,53 @@ pub fn convert_frames_with_palette_and_progress(
         return Err(Error::Cancelled);
     }
 
-    let keymap = KeyMap::build(
-        config.key_start,
-        config.key_end,
-        config.key_filter,
-        config.column_mapping,
-    )?;
-
-    let rotated = if normalize_degrees(config.rotation_deg) == 0.0 {
-        None
+    let mut timings = StageTimings::default();
+    let keymap_start = Instant::now();
+    let keymap = if let Some(keymap) = seed.and_then(|seed| seed.keymap.clone()) {
+        keymap
     } else {
+        KeyMap::build(
+            config.key_start,
+            config.key_end,
+            config.key_filter,
+            config.column_mapping,
+        )?
+    };
+    timings.transform_ms += keymap_start.elapsed().as_secs_f32() * 1000.0;
+
+    let can_reuse_resized = seed.is_some_and(|seed| {
+        seed.resized.is_some() && seed.source_size.is_some() && seed.resized_size.is_some()
+    });
+    let palette_available = config.manual_palette.is_some()
+        || shared_palette.is_some_and(|palette| !palette.is_empty())
+        || seed
+            .and_then(|seed| seed.palette.as_ref())
+            .is_some_and(|palette| !palette.is_empty());
+    let needs_current_source = !palette_available
+        && (config.palette_scope == PaletteScope::CurrentFrame || palette_frames.is_empty());
+    let needs_rotated_source = !can_reuse_resized || needs_current_source;
+
+    let rotation_start = Instant::now();
+    let rotated = if needs_rotated_source && normalize_degrees(config.rotation_deg) != 0.0 {
         Some(rotate_image(image, config.rotation_deg)?)
+    } else {
+        None
     };
     let source = rotated.as_ref().unwrap_or(image);
+    timings.transform_ms += rotation_start.elapsed().as_secs_f32() * 1000.0;
 
+    let palette_start = Instant::now();
     report(progress, Stage::Palette, 0.0);
     let palette = match &config.manual_palette {
         Some(palette) if !palette.is_empty() => palette.clone(),
         Some(_) => return Err(Error::Config("手动调色板不能为空".into())),
         None => {
             if let Some(palette) = shared_palette.filter(|palette| !palette.is_empty()) {
+                palette.clone()
+            } else if let Some(palette) = seed
+                .and_then(|seed| seed.palette.as_ref())
+                .filter(|palette| !palette.is_empty())
+            {
                 palette.clone()
             } else if config.palette_scope == PaletteScope::AllFrames && !palette_frames.is_empty()
             {
@@ -214,6 +297,7 @@ pub fn convert_frames_with_palette_and_progress(
         }
     };
     report(progress, Stage::Palette, 1.0);
+    timings.palette_ms = palette_start.elapsed().as_secs_f32() * 1000.0;
     if palette.is_empty() {
         return Err(Error::Config("图像中没有不透明像素，无法生成调色板".into()));
     }
@@ -221,36 +305,63 @@ pub fn convert_frames_with_palette_and_progress(
         return Err(Error::Cancelled);
     }
 
-    let target_width = keymap.width();
-    if target_width == 0 {
-        return Err(Error::Config("键映射没有产生任何列".into()));
-    }
-
-    let target_height = if config.target_height > 0 {
-        config.target_height
+    let transform_start = Instant::now();
+    let (resized, source_size, resized_size) = if let Some((resized, source_size, resized_size)) =
+        seed.and_then(|seed| {
+            Some((
+                seed.resized.as_ref()?,
+                seed.source_size?,
+                seed.resized_size?,
+            ))
+        }) {
+        (resized.clone(), source_size, resized_size)
     } else {
-        ((source.height as f64) * (target_width as f64) / (source.width as f64))
-            .round()
-            .max(1.0) as u32
+        let target_width = keymap.width();
+        if target_width == 0 {
+            return Err(Error::Config("键映射没有产生任何列".into()));
+        }
+
+        let target_height = if config.target_height > 0 {
+            config.target_height
+        } else {
+            ((source.height as f64) * (target_width as f64) / (source.width as f64))
+                .round()
+                .max(1.0) as u32
+        };
+
+        // A pathological aspect ratio (e.g. a 1 x 100000 strip) would
+        // otherwise allocate hundreds of millions of pixels. Fail loudly
+        // instead of OOM.
+        const MAX_CONVERTED_HEIGHT: u32 = 65_535;
+        if target_height > MAX_CONVERTED_HEIGHT {
+            return Err(Error::Config(format!(
+                "缩放后高度 {target_height}px 超过上限 {MAX_CONVERTED_HEIGHT}px；请先裁剪图片"
+            )));
+        }
+
+        report(progress, Stage::Resize, 0.0);
+        let resized = resize(source, target_width, target_height, config.resize)?;
+        report(progress, Stage::Resize, 1.0);
+        (
+            resized,
+            (source.width, source.height),
+            (target_width, target_height),
+        )
     };
-
-    // A pathological aspect ratio (e.g. a 1 x 100000 strip) would otherwise
-    // allocate hundreds of millions of pixels. Fail loudly instead of OOM.
-    const MAX_CONVERTED_HEIGHT: u32 = 65_535;
-    if target_height > MAX_CONVERTED_HEIGHT {
-        return Err(Error::Config(format!(
-            "缩放后高度 {target_height}px 超过上限 {MAX_CONVERTED_HEIGHT}px；请先裁剪图片"
-        )));
-    }
-
-    report(progress, Stage::Resize, 0.0);
-    let resized = resize(source, target_width, target_height, config.resize)?;
-    report(progress, Stage::Resize, 1.0);
+    timings.transform_ms += transform_start.elapsed().as_secs_f32() * 1000.0;
     if cancel.load(Ordering::Relaxed) {
         return Err(Error::Cancelled);
     }
 
-    let indexed = quantize_with_progress(&resized, &palette, cancel, progress)?;
+    let quantize_start = Instant::now();
+    let indexed = if let Some(indexed) = seed.and_then(|seed| seed.indexed.clone()) {
+        indexed
+    } else {
+        quantize_with_progress(&resized, &palette, cancel, progress)?
+    };
+    timings.quantize_ms = quantize_start.elapsed().as_secs_f32() * 1000.0;
+
+    let notes_start = Instant::now();
     let (notes, note_count_by_track) = generate_notes_with_progress(
         &indexed,
         &keymap,
@@ -260,6 +371,8 @@ pub fn convert_frames_with_palette_and_progress(
         cancel,
         progress,
     )?;
+    timings.notes_ms = notes_start.elapsed().as_secs_f32() * 1000.0;
+    timings.total_ms = total_start.elapsed().as_secs_f32() * 1000.0;
 
     Ok(ConversionResult {
         notes,
@@ -267,12 +380,13 @@ pub fn convert_frames_with_palette_and_progress(
         keymap,
         key_start: config.key_start,
         key_end: config.key_end,
-        duration_px: target_height,
-        source_size: (source.width, source.height),
-        resized_size: (target_width, target_height),
+        duration_px: resized_size.1,
+        source_size,
+        resized_size,
         resized_image: resized,
         indexed_image: indexed,
         note_count_by_track,
+        timings,
     })
 }
 
@@ -508,6 +622,49 @@ mod tests {
 
         assert_eq!(result.palette.len(), 1);
         assert_eq!(result.palette.colors[0], Color::rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn seeded_conversion_reuses_upstream_stages() {
+        let image = solid_red(8, 8);
+        let config = ConversionConfig {
+            key_start: 60,
+            key_end: 63,
+            palette_colors: 1,
+            ..ConversionConfig::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let first = convert_with_progress(&image, &config, None, &cancel).unwrap();
+        assert!(first.timings.total_ms >= 0.0);
+
+        let seed = ConversionSeed {
+            keymap: Some(first.keymap.clone()),
+            palette: Some(first.palette.clone()),
+            resized: Some(first.resized_image.clone()),
+            resized_size: Some(first.resized_size),
+            source_size: Some(first.source_size),
+            indexed: Some(first.indexed_image.clone()),
+        };
+        let next_config = ConversionConfig {
+            max_note_length: 2,
+            ..config
+        };
+        let second = convert_seeded_with_progress(
+            &image,
+            &[],
+            &[],
+            None,
+            Some(&seed),
+            &next_config,
+            None,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(second.palette, first.palette);
+        assert_eq!(second.keymap, first.keymap);
+        assert_eq!(second.resized_size, first.resized_size);
+        assert_ne!(second.notes.len(), first.notes.len());
     }
 
     #[test]

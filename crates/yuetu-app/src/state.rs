@@ -18,6 +18,9 @@ const MAX_TEXTURE_SIDE: u32 = 4096;
 /// Longest side of a frame-strip thumbnail before rotation. Small enough that
 /// generating a few visible thumbnails while scrolling is cheap.
 const THUMBNAIL_MAX_SIDE: u32 = 96;
+/// Working-resolution source used by stage previews while scrubbing. The
+/// final conversion still uses the original image.
+const INTERACTION_MAX_SIDE: u32 = 1024;
 
 struct Thumbnail {
     texture: TextureHandle,
@@ -35,6 +38,8 @@ pub struct SourceImage {
     pub display_image: Arc<RgbaImage>,
     /// Full rotated canvas dimensions, used by rulers and hit-testing.
     pub display_size: (u32, u32),
+    /// Low-resolution rotated source used for stage 2/3 interaction previews.
+    interaction_image: Arc<RgbaImage>,
     pub has_transparency: bool,
     frames: Vec<Arc<RgbaImage>>,
     delays_ms: Vec<u32>,
@@ -51,6 +56,7 @@ impl SourceImage {
         let image = frames[0].clone();
         let display_image = image.clone();
         let display_size = (image.width, image.height);
+        let interaction_image = prepare_interaction(&image, 0.0)?;
         let has_transparency = image_has_transparency(&display_image);
         let texture_name = format!("source:{}:0", path.display());
         let texture = upload_texture(ctx, &texture_name, &display_image)?;
@@ -68,6 +74,7 @@ impl SourceImage {
             image,
             display_image,
             display_size,
+            interaction_image,
             has_transparency,
             frames,
             delays_ms,
@@ -98,6 +105,10 @@ impl SourceImage {
 
     pub fn rotation_deg(&self) -> f32 {
         self.rotation_deg
+    }
+
+    pub fn interaction_image(&self) -> &RgbaImage {
+        &self.interaction_image
     }
 
     /// Sample the display preview using full-canvas pixel coordinates.
@@ -192,11 +203,13 @@ impl SourceImage {
         }
 
         let (display_image, display_size) = prepare_display(ctx, &self.image, degrees)?;
+        let interaction_image = prepare_interaction(&self.image, degrees)?;
         let has_transparency = image_has_transparency(&display_image);
         let texture_name = self.texture_name(self.frame_index);
         let texture = upload_texture(ctx, &texture_name, &display_image)?;
         self.display_image = display_image;
         self.display_size = display_size;
+        self.interaction_image = interaction_image;
         self.has_transparency = has_transparency;
         self.rotation_deg = degrees;
         self.texture = texture;
@@ -241,6 +254,28 @@ fn prepare_display(
     };
     let rotated = rotate_image(&small, degrees)?;
     Ok((Arc::new(rotated), full_size))
+}
+
+fn prepare_interaction(image: &RgbaImage, degrees: f32) -> yuetu_core::Result<Arc<RgbaImage>> {
+    let degrees = normalize_degrees(degrees);
+    let full_size = rotated_dimensions(image.width, image.height, degrees);
+    if degrees == 0.0 && image.width.max(image.height) <= INTERACTION_MAX_SIDE {
+        return Ok(Arc::new(image.clone()));
+    }
+
+    let scale = (INTERACTION_MAX_SIDE as f64 / full_size.0.max(full_size.1).max(1) as f64).min(1.0);
+    let width = (image.width as f64 * scale).round().max(1.0) as u32;
+    let height = (image.height as f64 * scale).round().max(1.0) as u32;
+    let small = if width == image.width && height == image.height {
+        image.clone()
+    } else {
+        resize(image, width, height, ResizeAlgorithm::Nearest)?
+    };
+    if degrees == 0.0 {
+        Ok(Arc::new(small))
+    } else {
+        rotate_image(&small, degrees).map(Arc::new)
+    }
 }
 
 fn upload_texture(
@@ -391,6 +426,18 @@ pub enum StageHover {
     },
 }
 
+pub struct StageSnapshot {
+    pub resized_image: RgbaImage,
+    pub resized_texture: TextureHandle,
+    pub resized_has_transparency: bool,
+    pub resized_size: (u32, u32),
+    pub indexed_image: IndexedImage,
+    pub indexed_texture: TextureHandle,
+    pub indexed_has_transparency: bool,
+    pub keymap: KeyMap,
+    pub palette: Palette,
+}
+
 pub struct Preview {
     pub result: ConversionResult,
     /// The config that produced this preview; used to gate export while an
@@ -406,6 +453,9 @@ pub struct Preview {
     pub indexed_has_transparency: bool,
     /// Persistent GPU instance data for the MIDI stage.
     pub midi_gpu: Arc<MidiGpuData>,
+    /// Temporary interaction-resolution key-map/palette snapshot. The full
+    /// result stays untouched, so MIDI/export never see mixed stages.
+    pub interaction: Option<StageSnapshot>,
 }
 
 impl Preview {
@@ -435,6 +485,7 @@ impl Preview {
             indexed_texture,
             indexed_has_transparency,
             midi_gpu,
+            interaction: None,
         })
     }
 
@@ -442,9 +493,15 @@ impl Preview {
     /// key-map or palette stage. It uses the same resize algorithm as the
     /// final conversion so releasing the mouse does not change the picture.
     /// Notes and MIDI instances stay untouched until the final conversion.
+    /// Intermediate stage snapshot used while scrubbing frames on the
+    /// key-map or palette stage. It uses the same resize algorithm as the
+    /// final conversion so releasing the mouse does not change the picture.
+    /// The full result (notes, MIDI instances, export metadata) is untouched.
     pub fn update_scrub_frame(
         &mut self,
+        ctx: &egui::Context,
         image: &RgbaImage,
+        full_source_size: (u32, u32),
         config: &ConversionConfig,
         palette: &Palette,
     ) -> yuetu_core::Result<()> {
@@ -454,56 +511,35 @@ impl Preview {
             config.key_filter,
             config.column_mapping,
         )?;
-
-        let rotated = if normalize_degrees(config.rotation_deg) == 0.0 {
-            None
-        } else {
-            Some(rotate_image(image, config.rotation_deg)?)
-        };
-        let source = rotated.as_ref().unwrap_or(image);
         let target_width = keymap.width().max(1);
         let target_height = if config.target_height > 0 {
             config.target_height
         } else {
-            ((source.height as f64) * (target_width as f64) / (source.width as f64))
+            ((full_source_size.1 as f64) * (target_width as f64)
+                / (full_source_size.0.max(1) as f64))
                 .round()
                 .max(1.0) as u32
         };
 
-        let resized = resize(source, target_width, target_height, config.resize)?;
+        let resized = resize(image, target_width, target_height, config.resize)?;
         let indexed = quantize(&resized, palette);
-
+        let resized_name = format!("stage:resized:interaction:{}", self.source_revision);
+        let resized_texture = upload_texture(ctx, &resized_name, &resized)?;
         let indexed_rgba = indexed_to_rgba(&indexed, palette)?;
-        self.resized_texture.set(
-            egui::ColorImage::from_rgba_unmultiplied(
-                [resized.width as usize, resized.height as usize],
-                resized.as_rgba(),
-            ),
-            display_texture_options(),
-        );
-        self.indexed_texture.set(
-            egui::ColorImage::from_rgba_unmultiplied(
-                [indexed_rgba.width as usize, indexed_rgba.height as usize],
-                indexed_rgba.as_rgba(),
-            ),
-            display_texture_options(),
-        );
+        let indexed_name = format!("stage:indexed:interaction:{}", self.source_revision);
+        let indexed_texture = upload_texture(ctx, &indexed_name, &indexed_rgba)?;
 
-        self.result.keymap = keymap;
-        self.result.key_start = config.key_start;
-        self.result.key_end = config.key_end;
-        self.result.palette = palette.clone();
-        self.result.source_size = (source.width, source.height);
-        self.result.resized_size = (target_width, target_height);
-        self.result.resized_image = resized;
-        self.result.indexed_image = indexed;
-        self.resized_has_transparency = image_has_transparency(&self.result.resized_image);
-        self.indexed_has_transparency = self
-            .result
-            .indexed_image
-            .indices
-            .iter()
-            .any(|&index| index < 0);
+        self.interaction = Some(StageSnapshot {
+            resized_has_transparency: image_has_transparency(&resized),
+            resized_image: resized,
+            resized_texture,
+            resized_size: (target_width, target_height),
+            indexed_has_transparency: indexed.indices.iter().any(|&index| index < 0),
+            indexed_image: indexed,
+            indexed_texture,
+            keymap,
+            palette: palette.clone(),
+        });
         Ok(())
     }
 }
@@ -537,6 +573,7 @@ pub enum StatusKind {
 pub struct StatusMessage {
     pub kind: StatusKind,
     pub text: String,
+    pub detail: Option<String>,
 }
 
 impl StatusMessage {
@@ -544,6 +581,7 @@ impl StatusMessage {
         Self {
             kind: StatusKind::Info,
             text: text.into(),
+            detail: None,
         }
     }
 
@@ -551,6 +589,7 @@ impl StatusMessage {
         Self {
             kind: StatusKind::Success,
             text: text.into(),
+            detail: None,
         }
     }
 
@@ -558,6 +597,7 @@ impl StatusMessage {
         Self {
             kind: StatusKind::Warning,
             text: text.into(),
+            detail: None,
         }
     }
 
@@ -565,7 +605,13 @@ impl StatusMessage {
         Self {
             kind: StatusKind::Error,
             text: text.into(),
+            detail: None,
         }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 }
 

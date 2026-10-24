@@ -101,7 +101,10 @@ fn status_cell(
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
         ui.painter().circle_filled(rect.center(), 3.5, status_color);
-        ui.label(RichText::new(status.text.as_str()).color(status_color));
+        let label = ui.label(RichText::new(status.text.as_str()).color(status_color));
+        if let Some(detail) = &status.detail {
+            label.on_hover_text(detail);
+        }
 
         if let Some(hover) = hover {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

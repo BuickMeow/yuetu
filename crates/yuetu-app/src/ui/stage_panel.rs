@@ -60,45 +60,75 @@ pub fn show(
 
             match stage {
                 PipelineStage::KeyMap => {
+                    let (texture, size, transparency, image, keymap) =
+                        if let Some(stage) = preview.interaction.as_ref() {
+                            (
+                                stage.resized_texture.id(),
+                                stage.resized_size,
+                                stage.resized_has_transparency,
+                                &stage.resized_image,
+                                &stage.keymap,
+                            )
+                        } else {
+                            (
+                                preview.resized_texture.id(),
+                                preview.result.resized_size,
+                                preview.resized_has_transparency,
+                                &preview.result.resized_image,
+                                &preview.result.keymap,
+                            )
+                        };
                     let hovered = stage_image::show(
                         ui,
                         view,
-                        preview.resized_texture.id(),
-                        preview.result.resized_size,
-                        preview.resized_has_transparency,
+                        texture,
+                        size,
+                        transparency,
                         checker_texture,
                         coordinate_origin,
                     );
                     *hover = hovered.map(|pixel| StageHover::KeyMap {
                         pos: (pixel.x, pixel.y),
-                        color: preview
-                            .result
-                            .resized_image
-                            .pixel(pixel.x, pixel.y)
-                            .unwrap_or(Color::TRANSPARENT),
-                        key: preview.result.keymap.key_at(pixel.x),
-                        height: preview.result.resized_size.1,
+                        color: image.pixel(pixel.x, pixel.y).unwrap_or(Color::TRANSPARENT),
+                        key: keymap.key_at(pixel.x),
+                        height: size.1,
                     });
                 }
                 PipelineStage::Palette => {
+                    let (texture, size, transparency, indexed, palette) =
+                        if let Some(stage) = preview.interaction.as_ref() {
+                            (
+                                stage.indexed_texture.id(),
+                                (stage.indexed_image.width, stage.indexed_image.height),
+                                stage.indexed_has_transparency,
+                                &stage.indexed_image,
+                                &stage.palette,
+                            )
+                        } else {
+                            (
+                                preview.indexed_texture.id(),
+                                (
+                                    preview.result.indexed_image.width,
+                                    preview.result.indexed_image.height,
+                                ),
+                                preview.indexed_has_transparency,
+                                &preview.result.indexed_image,
+                                &preview.result.palette,
+                            )
+                        };
                     let hovered = stage_image::show(
                         ui,
                         view,
-                        preview.indexed_texture.id(),
-                        (
-                            preview.result.indexed_image.width,
-                            preview.result.indexed_image.height,
-                        ),
-                        preview.indexed_has_transparency,
+                        texture,
+                        size,
+                        transparency,
                         checker_texture,
                         coordinate_origin,
                     );
                     *hover = hovered.map(|pixel| {
-                        let index = preview.result.indexed_image.at(pixel.x, pixel.y);
+                        let index = indexed.at(pixel.x, pixel.y);
                         let color = if index >= 0 {
-                            preview
-                                .result
-                                .palette
+                            palette
                                 .colors
                                 .get(index as usize)
                                 .copied()

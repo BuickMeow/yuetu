@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use egui::{Key, Modifiers};
-use yuetu_core::{ConversionConfig, Palette, PaletteScope, Stage};
+use yuetu_core::{ConversionConfig, ConversionSeed, Palette, PaletteScope, Stage};
 
 use crate::jobs::{JobEvent, JobRunner, ProgressView};
 use crate::settings::Settings;
@@ -181,6 +181,11 @@ impl YuetuApp {
         }
 
         let config = self.settings.conversion_config();
+        let seed = self.conversion_seed(&config);
+        let seed_has_palette = seed
+            .as_ref()
+            .and_then(|seed| seed.palette.as_ref())
+            .is_some();
         let shared_palette =
             if config.palette_scope == PaletteScope::AllFrames && config.manual_palette.is_none() {
                 self.shared_palette_cache
@@ -193,8 +198,9 @@ impl YuetuApp {
             } else {
                 None
             };
-        let need_palette_frames =
-            config.palette_scope == PaletteScope::AllFrames && shared_palette.is_none();
+        let need_palette_frames = config.palette_scope == PaletteScope::AllFrames
+            && shared_palette.is_none()
+            && !seed_has_palette;
         let palette_frames = if need_palette_frames {
             source.palette_frames().to_vec()
         } else {
@@ -212,6 +218,7 @@ impl YuetuApp {
             palette_frames,
             delays_ms,
             shared_palette,
+            seed,
             config.clone(),
         ) {
             Ok(_) => {
@@ -232,6 +239,43 @@ impl YuetuApp {
                 self.job_started = None;
                 self.status = StatusMessage::error(format!("无法启动转换任务：{error}"));
             }
+        }
+    }
+
+    /// Build a stage-cache seed from the current preview when its upstream
+    /// keys still match the requested configuration.
+    fn conversion_seed(&self, config: &ConversionConfig) -> Option<ConversionSeed> {
+        let preview = self.preview.as_ref()?;
+        let previous = &preview.config;
+        let same_source = preview.source_revision == self.source_revision;
+        let same_keymap = keymap_config_eq(previous, config);
+        let same_palette = palette_config_eq(previous, config);
+        let same_transform = same_source && transform_config_eq(previous, config);
+
+        let mut seed = ConversionSeed::default();
+        if same_keymap {
+            seed.keymap = Some(preview.result.keymap.clone());
+        }
+        if same_palette {
+            seed.palette = Some(preview.result.palette.clone());
+        }
+        if same_transform {
+            seed.resized = Some(preview.result.resized_image.clone());
+            seed.resized_size = Some(preview.result.resized_size);
+            seed.source_size = Some(preview.result.source_size);
+            if same_palette {
+                seed.indexed = Some(preview.result.indexed_image.clone());
+            }
+        }
+
+        if seed.keymap.is_some()
+            || seed.palette.is_some()
+            || seed.resized.is_some()
+            || seed.indexed.is_some()
+        {
+            Some(seed)
+        } else {
+            None
         }
     }
 
@@ -326,7 +370,7 @@ impl YuetuApp {
             self.frame_scrub_pending = true;
             self.status = StatusMessage::info("浏览帧…");
             if matches!(self.stage, PipelineStage::KeyMap | PipelineStage::Palette) {
-                self.update_scrub_preview();
+                self.update_scrub_preview(ctx);
             }
         } else {
             self.frame_scrub_pending = false;
@@ -339,11 +383,12 @@ impl YuetuApp {
     /// Refresh only the resized/indexed images while scrubbing. This bypasses
     /// the background conversion so the key-map and palette stages follow the
     /// pointer without recomputing notes.
-    fn update_scrub_preview(&mut self) {
+    fn update_scrub_preview(&mut self, ctx: &egui::Context) {
         let Some(source) = self.source.as_ref() else {
             return;
         };
-        let image = source.display_image.clone();
+        let image = source.interaction_image().clone();
+        let full_source_size = source.display_size;
         let config = self.settings.conversion_config();
         let Some(preview) = self.preview.as_mut() else {
             return;
@@ -357,7 +402,9 @@ impl YuetuApp {
         let mut preview_config = config;
         preview_config.rotation_deg = 0.0;
         let palette = preview.result.palette.clone();
-        if let Err(error) = preview.update_scrub_frame(&image, &preview_config, &palette) {
+        if let Err(error) =
+            preview.update_scrub_frame(ctx, &image, full_source_size, &preview_config, &palette)
+        {
             tracing::warn!("failed to build scrub preview: {error}");
         }
     }
@@ -400,6 +447,14 @@ impl YuetuApp {
                     let current = self.settings.conversion_config();
                     let had_preview = self.preview.is_some();
                     self.job_progress = None;
+                    tracing::debug!(
+                        palette_ms = result.timings.palette_ms,
+                        transform_ms = result.timings.transform_ms,
+                        quantize_ms = result.timings.quantize_ms,
+                        notes_ms = result.timings.notes_ms,
+                        total_ms = result.timings.total_ms,
+                        "conversion stage timings"
+                    );
                     if config.palette_scope == PaletteScope::AllFrames
                         && config.manual_palette.is_none()
                         && job_source_generation == Some(self.source_generation)
@@ -411,11 +466,19 @@ impl YuetuApp {
                         });
                     }
                     if config == current && source_revision == self.source_revision {
+                        let timings = result.timings;
                         self.status = StatusMessage::success(format!(
                             "生成完成：{} 音符 · {} 音轨 · 用时 {:.1} ms",
                             result.note_count(),
                             result.track_count(),
                             elapsed.as_secs_f64() * 1000.0
+                        ))
+                        .with_detail(format!(
+                            "调色板 {:.1} ms\n键位映射/缩放 {:.1} ms\n量化 {:.1} ms\n音符 {:.1} ms",
+                            timings.palette_ms,
+                            timings.transform_ms,
+                            timings.quantize_ms,
+                            timings.notes_ms
                         ));
                     } else {
                         self.status = StatusMessage::info("正在更新预览…");
@@ -806,4 +869,24 @@ impl eframe::App for YuetuApp {
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         visuals.panel_fill.to_normalized_gamma_f32()
     }
+}
+
+fn keymap_config_eq(a: &ConversionConfig, b: &ConversionConfig) -> bool {
+    a.key_start == b.key_start
+        && a.key_end == b.key_end
+        && a.key_filter == b.key_filter
+        && a.column_mapping == b.column_mapping
+}
+
+fn palette_config_eq(a: &ConversionConfig, b: &ConversionConfig) -> bool {
+    a.palette_colors == b.palette_colors
+        && a.manual_palette == b.manual_palette
+        && a.palette_scope == b.palette_scope
+}
+
+fn transform_config_eq(a: &ConversionConfig, b: &ConversionConfig) -> bool {
+    keymap_config_eq(a, b)
+        && a.resize == b.resize
+        && a.rotation_deg == b.rotation_deg
+        && a.target_height == b.target_height
 }
