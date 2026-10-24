@@ -322,7 +322,7 @@ eframe::Renderer::Wgpu
   └─ MIDI 音符：egui_wgpu::Callback + instance buffer → 一次 instanced draw
 ```
 
-- 图片显示本来就是一个纹理 quad，GPU 采样；不需要每帧 CPU 重建像素。状态图片纹理在放大和缩小两侧都使用线性过滤，避免 Retina 下跨过 50% 时从最近邻突然变成另一种观感；显示纹理始终是完整预览纹理，不是缩略图。
+- 图片显示本来就是一个纹理 quad，GPU 采样；不需要每帧 CPU 重建像素。状态图片纹理在放大和缩小两侧都使用最近邻过滤；跨过 Retina 的 50% 物理 1:1 点时不会切换过滤方式，显示纹理始终是完整预览纹理，不是缩略图。
 - 棋盘格改为一张可重复的 2×2 灰度纹理，通过 `TextureWrapMode::Repeat` 和单个 Mesh quad 绘制；不再逐格生成 Shape。
 - MIDI 音符实例在 `ConversionResult` 变化时构建并上传一次；拖动/缩放只更新 uniform，GPU 每帧一次 instanced draw。实例数据包含键位位置、start/end、颜色；uniform 提供 X/Y 两个尺度和时间方向，顶点 shader 直接生成对应方向的 note quad。
 

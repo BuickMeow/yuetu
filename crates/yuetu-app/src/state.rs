@@ -365,13 +365,11 @@ fn texture_color_image(
 }
 
 fn display_texture_options() -> TextureOptions {
-    // Use one filter on both sides of the 1:1 line. With nearest
-    // magnification, Retina displays visibly switch from crisp texels to
-    // filtered minification at 50%; that looks like an LOD/thumbnail change
-    // even though the full texture is still bound.
+    // Nearest on both sides of the 1:1 line: no filtering switch at 50% on
+    // Retina, no LOD/thumbnail illusion, and pixel boundaries stay crisp.
     TextureOptions {
-        magnification: TextureFilter::Linear,
-        minification: TextureFilter::Linear,
+        magnification: TextureFilter::Nearest,
+        minification: TextureFilter::Nearest,
         wrap_mode: TextureWrapMode::ClampToEdge,
         mipmap_mode: None,
     }
