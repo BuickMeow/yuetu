@@ -11,6 +11,8 @@ use thiserror::Error;
 use yuetu_core::{ResizeAlgorithm, RgbaImage, resize::resize, rotate::rotate_image};
 
 mod gpu;
+mod gpu_eps;
+mod gpu_pdf;
 
 #[derive(Debug, Error)]
 pub enum VectorError {
@@ -222,8 +224,9 @@ impl VectorDocument {
     }
 
     /// Build a Vello GPU scene using a page-user-unit -> output-pixel
-    /// transform. Only SVG paths that can be represented faithfully are
-    /// accepted; `None` means the caller should keep using the CPU renderer.
+    /// transform when the backend can express the page's drawing operations
+    /// as vector paths. `None` means the caller should keep using the CPU
+    /// renderer for this page.
     pub fn build_gpu_scene(
         &self,
         page: usize,
@@ -231,12 +234,22 @@ impl VectorDocument {
         height: u32,
         transform: ViewTransform,
     ) -> Option<vello_gpu::Scene> {
-        if page != 0 {
-            return None;
-        }
         match &self.backend {
-            Backend::Svg(tree) => gpu::build(tree, width, height, transform),
-            Backend::Pdf(_) | Backend::Eps(_) => None,
+            Backend::Svg(tree) => {
+                if page != 0 {
+                    return None;
+                }
+                gpu::build(tree, width, height, transform)
+            }
+            Backend::Pdf(pdf) => {
+                let pages = pdf.pages();
+                let page = pages.get(page)?;
+                gpu_pdf::build(page, width, height, transform)
+            }
+            Backend::Eps(eps) => {
+                let page = eps.pages.get(page)?;
+                gpu_eps::build(&page.display_list, width, height, transform)
+            }
         }
     }
 
@@ -758,6 +771,96 @@ mod tests {
                 b: 0.0,
                 c: 0.0,
                 d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            },
+        );
+        assert!(scene.is_some());
+    }
+
+    #[test]
+    fn pdf_builds_a_gpu_scene_for_paths() {
+        let document = fixture("vector.pdf");
+        let scene = document.build_gpu_scene(
+            0,
+            800,
+            600,
+            ViewTransform {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
+                e: 0.0,
+                f: 0.0,
+            },
+        );
+        assert!(scene.is_some());
+        let page_two = document.build_gpu_scene(
+            1,
+            800,
+            600,
+            ViewTransform {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
+                e: 0.0,
+                f: 0.0,
+            },
+        );
+        assert!(page_two.is_some());
+    }
+
+    #[test]
+    fn eps_builds_a_gpu_scene_for_paths() {
+        let document = fixture("vector.eps");
+        let scene = document.build_gpu_scene(
+            0,
+            800,
+            600,
+            ViewTransform {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
+                e: 0.0,
+                f: 0.0,
+            },
+        );
+        assert!(scene.is_some());
+    }
+
+    #[test]
+    fn old_ai_builds_a_gpu_scene_through_postscript() {
+        let document = fixture("vector-eps.ai");
+        let scene = document.build_gpu_scene(
+            0,
+            800,
+            600,
+            ViewTransform {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
+                e: 0.0,
+                f: 0.0,
+            },
+        );
+        assert!(scene.is_some());
+    }
+
+    #[test]
+    fn modern_ai_builds_a_gpu_scene_through_pdf() {
+        let document = fixture("vector.ai");
+        let scene = document.build_gpu_scene(
+            0,
+            800,
+            600,
+            ViewTransform {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
                 e: 0.0,
                 f: 0.0,
             },
