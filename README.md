@@ -42,6 +42,19 @@ cargo run -p yuetu-app --release -- path/to/image.png
 cargo run -p yuetu-app
 ```
 
+## 发布 Beta
+
+GitHub Actions 的 `build` 工作流支持两种方式：
+
+- 在 Actions 页面手动运行一次：自动生成 `0.1.0-beta.N`，构建 macOS dmg、Windows zip、Linux tar.gz 并发布为 Pre-release。
+- 推送 `v0.1.0` 这样的 tag：发布正式版。
+
+macOS 使用 ad-hoc 签名（没有 Apple Developer ID / notarization）。本地验证打包：
+
+```bash
+YUETU_VERSION=0.1.0-beta.1 bash scripts/bundle-macos.sh
+```
+
 ## 测试图片
 
 `testdata/` 收了一组小型手动用例：静态网格、透明稀疏图、40/300 帧动画、共享调色板动画和 800×800 扫帧动画。说明见 [`testdata/README.md`](testdata/README.md)，解码回归：

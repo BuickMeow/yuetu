@@ -1,0 +1,164 @@
+name: build
+
+# push 正式版 tag（v*）或手动运行一次，产出一个 beta 版本。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: 计算版本号
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.calc.outputs.version }}
+      tag: ${{ steps.calc.outputs.tag }}
+      prerelease: ${{ steps.calc.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 计算版本号
+        id: calc
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            tag="${GITHUB_REF_NAME}"
+            prerelease=false
+          else
+            base="$(awk -F'"' '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f&&/^version =/{print $2; exit}' Cargo.toml)"
+            if [[ ! "${base}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::无法从根 Cargo.toml 的 [workspace.package] 读到纯 x.y.z 格式的 version（读到：${base}）"
+              exit 1
+            fi
+            if [[ -n "$(git tag -l "v${base}")" ]]; then
+              echo "::error::正式版 v${base} 已发布，请先更新根 Cargo.toml 的 [workspace.package] version"
+              exit 1
+            fi
+            last_n="$(git tag -l "${base}-beta.*" | sed 's/.*-beta\.//' | grep -E '^[0-9]+$' | sort -n | tail -n1 || true)"
+            version="${base}-beta.$(( ${last_n:-0} + 1 ))"
+            tag="${version}"
+            prerelease=true
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+          echo "本次版本号: ${version}（prerelease=${prerelease}）"
+
+  macos:
+    name: macOS (dmg)
+    needs: version
+    runs-on: macos-latest
+    env:
+      YUETU_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --version 0.11.0
+
+      - name: Bundle, sign and package dmg
+        run: bash scripts/bundle-macos.sh
+
+      - name: Rename dmg with version
+        run: mv target/release/bundle/dmg/Yuetu.dmg "Yuetu-${YUETU_VERSION}.dmg"
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: Yuetu-macos
+          path: Yuetu-${{ env.YUETU_VERSION }}.dmg
+
+  windows:
+    name: Windows (zip)
+    needs: version
+    runs-on: windows-latest
+    env:
+      YUETU_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release -p yuetu-app
+
+      - name: Package zip
+        shell: pwsh
+        run: Compress-Archive -Path target/release/yuetu.exe -DestinationPath "Yuetu-$env:YUETU_VERSION-windows.zip"
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Yuetu-windows
+          path: Yuetu-${{ env.YUETU_VERSION }}-windows.zip
+
+  linux:
+    name: Linux (tar.gz)
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      YUETU_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libx11-dev libxi-dev \
+            libxcursor-dev libxrandr-dev libxinerama-dev \
+            libgl1-mesa-dev libvulkan-dev libfontconfig1-dev libfreetype6-dev \
+            pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release -p yuetu-app
+
+      - name: Package tarball
+        run: tar -czf "Yuetu-${YUETU_VERSION}-linux.tar.gz" -C target/release yuetu
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: Yuetu-linux
+          path: Yuetu-${{ env.YUETU_VERSION }}-linux.tar.gz
+
+  release:
+    name: 发布到 GitHub Release
+    needs: [version, macos, windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.version }}
+          prerelease: ${{ needs.version.outputs.prerelease }}
+          generate_release_notes: true
+          files: artifacts/*

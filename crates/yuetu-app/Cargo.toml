@@ -21,3 +21,11 @@ egui_material_icons = { workspace = true }
 rfd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[package.metadata.bundle]
+name = "Yuetu"
+identifier = "com.jieneng.yuetu"
+copyright = "Copyright (c) Jieneng 2026"
+category = "Music"
+short_description = "Turn images and vector documents into a MIDI piano roll."
+long_description = "Yuetu converts images, GIF/WebP animations and vector documents into MIDI piano-roll notes."
