@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">月兔</title>
+  <desc id="desc">一只侧面坐着的兔子，单色镂空图标。</desc>
+
+  <defs>
+    <mask id="rabbit-holes" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="375" cy="459" r="17" fill="#000"/>
+      <circle cx="254" cy="518" r="11" fill="#000"/>
+      <ellipse cx="343" cy="254" rx="20" ry="90" transform="rotate(-11 343 254)" fill="#000"/>
+      <ellipse cx="556" cy="221" rx="20" ry="92" transform="rotate(13 556 221)" fill="#000"/>
+    </mask>
+  </defs>
+
+  <g fill="#5EEAD4" mask="url(#rabbit-holes)">
+    <!-- ears -->
+    <ellipse cx="350" cy="245" rx="63" ry="172" transform="rotate(-11 350 245)"/>
+    <ellipse cx="542" cy="215" rx="64" ry="185" transform="rotate(13 542 215)"/>
+
+    <!-- head -->
+    <circle cx="430" cy="470" r="135"/>
+    <circle cx="305" cy="505" r="66"/>
+
+    <!-- body -->
+    <circle cx="430" cy="590" r="112"/>
+    <circle cx="500" cy="690" r="145"/>
+    <circle cx="590" cy="775" r="168"/>
+    <circle cx="485" cy="810" r="110"/>
+
+    <!-- tail, hind foot and front paw -->
+    <circle cx="792" cy="722" r="48"/>
+    <ellipse cx="440" cy="902" rx="195" ry="60" transform="rotate(-3 440 902)"/>
+    <ellipse cx="365" cy="760" rx="52" ry="110"/>
+    <circle cx="325" cy="850" r="45"/>
+  </g>
+</svg>
