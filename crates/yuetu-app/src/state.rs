@@ -192,7 +192,14 @@ impl VectorSource {
             });
         }
         let page_size = self.page_size()?;
-        let (width, height) = capped_texture_size(viewport.size(), ppp, max_side);
+        let visible = content.intersect(viewport);
+        if !visible.is_positive() {
+            return Some(VectorDraw {
+                texture: fallback,
+                rect: content,
+            });
+        }
+        let (width, height) = capped_texture_size(visible.size(), ppp, max_side);
         if width == 0 || height == 0 {
             return None;
         }
@@ -208,10 +215,10 @@ impl VectorSource {
                 (content.bottom() * ppp).round() as i32,
             ],
             viewport: [
-                (viewport.left() * ppp).round() as i32,
-                (viewport.top() * ppp).round() as i32,
-                (viewport.right() * ppp).round() as i32,
-                (viewport.bottom() * ppp).round() as i32,
+                (visible.left() * ppp).round() as i32,
+                (visible.top() * ppp).round() as i32,
+                (visible.right() * ppp).round() as i32,
+                (visible.bottom() * ppp).round() as i32,
             ],
             ppp_bits: ppp.to_bits(),
         };
@@ -220,7 +227,7 @@ impl VectorSource {
                 *self.pending.borrow_mut() = None;
                 return Some(VectorDraw {
                     texture: cache.texture.id(),
-                    rect: viewport,
+                    rect: visible,
                 });
             }
         }
@@ -250,12 +257,12 @@ impl VectorSource {
             }
         }
 
-        let out_scale_x = width as f32 / (viewport.width() * ppp).max(1e-6);
-        let out_scale_y = height as f32 / (viewport.height() * ppp).max(1e-6);
+        let out_scale_x = width as f32 / (visible.width() * ppp).max(1e-6);
+        let out_scale_y = height as f32 / (visible.height() * ppp).max(1e-6);
         let transform = vector_view_transform(
             page_size,
             content,
-            viewport,
+            visible,
             rotation,
             ppp,
             out_scale_x,
@@ -294,7 +301,7 @@ impl VectorSource {
         };
         Some(VectorDraw {
             texture: id,
-            rect: viewport,
+            rect: visible,
         })
     }
 }

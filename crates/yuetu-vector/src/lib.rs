@@ -448,31 +448,7 @@ fn render_eps_view(
         None,
         false,
     );
-    let mut image = RgbaImage::from_rgba(width, height, rgba)
-        .map_err(|error| VectorError::Parse(error.to_string()))?;
-    // stet's region renderer composites onto white paper. Clear the area
-    // outside the actual EPS page so only the page covers the source view.
-    let page_width = page.width as f32;
-    let page_height = page.height as f32;
-    let page_x1 = transform.e + transform.a * page_width;
-    let page_y1 = transform.f + transform.d * page_height;
-    let (page_x0, page_x1) = (transform.e.min(page_x1), transform.e.max(page_x1));
-    let (page_y0, page_y1) = (transform.f.min(page_y1), transform.f.max(page_y1));
-    // Keep only pixels fully inside the page. A fractional page boundary
-    // otherwise leaves the one-pixel white paper fringe that stet composites
-    // around the page when it is scaled down.
-    let page_x0 = page_x0.ceil().clamp(0.0, width as f32) as u32;
-    let page_x1 = page_x1.floor().clamp(0.0, width as f32) as u32;
-    let page_y0 = page_y0.ceil().clamp(0.0, height as f32) as u32;
-    let page_y1 = page_y1.floor().clamp(0.0, height as f32) as u32;
-    for y in 0..height {
-        for x in 0..width {
-            if x < page_x0 || x >= page_x1 || y < page_y0 || y >= page_y1 {
-                image.set_pixel(x, y, yuetu_core::Color::TRANSPARENT);
-            }
-        }
-    }
-    Ok(image)
+    RgbaImage::from_rgba(width, height, rgba).map_err(|error| VectorError::Parse(error.to_string()))
 }
 
 fn vello_pixmap_to_rgba(pixmap: &hayro::vello_cpu::Pixmap) -> RgbaImage {
@@ -728,45 +704,6 @@ mod tests {
         let pixel = image.pixel(65, 80).unwrap();
         assert!(pixel.r > 150, "{pixel:?}");
         assert!(pixel.a > 200, "{pixel:?}");
-
-        let outside = document
-            .render_page_view(
-                0,
-                400,
-                300,
-                ViewTransform {
-                    a: 0.5,
-                    b: 0.0,
-                    c: 0.0,
-                    d: 0.5,
-                    e: 100.0,
-                    f: 75.0,
-                },
-            )
-            .unwrap();
-        assert_eq!(outside.pixel(10, 10).unwrap().a, 0);
-        assert_eq!(outside.pixel(99, 74).unwrap().a, 0);
-        assert_eq!(outside.pixel(300, 225).unwrap().a, 0);
-
-        let fractional = document
-            .render_page_view(
-                0,
-                400,
-                300,
-                ViewTransform {
-                    a: 0.5,
-                    b: 0.0,
-                    c: 0.0,
-                    d: 0.5,
-                    e: 100.5,
-                    f: 75.5,
-                },
-            )
-            .unwrap();
-        // The half-covered first/last pixels are removed instead of leaking a
-        // white paper fringe from stet's compositor.
-        assert_eq!(fractional.pixel(100, 100).unwrap().a, 0);
-        assert_eq!(fractional.pixel(300, 225).unwrap().a, 0);
     }
 
     #[test]
