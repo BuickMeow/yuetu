@@ -13,8 +13,6 @@
 
     <mask id="rabbit-holes" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
       <circle cx="512" cy="512" r="740" fill="#fff"/>
-      <circle cx="351" cy="459" r="17" fill="#000"/>
-      <circle cx="230" cy="518" r="11" fill="#000"/>
       <g clip-path="url(#inner-ear-left)"><circle cx="62.16" cy="296.29" r="286.78" fill="#000"/></g>
       <g clip-path="url(#inner-ear-right)"><circle cx="205.20" cy="152.78" r="339.03" fill="#000"/></g>
     </mask>
@@ -27,12 +25,10 @@
     <circle cx="406" cy="470" r="135"/>
     <circle cx="281" cy="505" r="66"/>
 
-    <circle cx="406" cy="590" r="112"/>
-    <circle cx="476" cy="690" r="145"/>
-    <circle cx="566" cy="775" r="168"/>
-    <circle cx="461" cy="810" r="110"/>
+    <circle cx="445" cy="590" r="135"/>
+    <circle cx="565" cy="740" r="195"/>
 
-    <circle cx="768" cy="722" r="48"/>
-    <circle cx="360" cy="900" r="70"/>
+    <circle cx="790" cy="710" r="45"/>
+    <circle cx="390" cy="895" r="68"/>
   </g>
 </svg>
