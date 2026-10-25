@@ -4,7 +4,7 @@ use egui::{TextureFilter, TextureHandle, TextureOptions, TextureWrapMode};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use yuetu_core::resize::resize;
 use yuetu_core::{
     Color, ConversionConfig, ConversionResult, ImageSequence, IndexedImage, KeyMap, Palette,
@@ -27,6 +27,9 @@ const INTERACTION_MAX_SIDE: u32 = 1024;
 /// Rasterization width used by the existing pixel pipeline for SVG sources.
 /// Display rendering is independent and follows the viewport zoom.
 const VECTOR_RASTER_LONG_SIDE: u32 = 2048;
+/// Wait for zoom to settle before re-rasterizing the vector source. The old
+/// texture is reused (at the same aspect) while the gesture is active.
+const VECTOR_RENDER_DEBOUNCE: Duration = Duration::from_millis(80);
 
 struct Thumbnail {
     texture: TextureHandle,
@@ -47,6 +50,7 @@ pub struct VectorSource {
     document: VectorDocument,
     page: usize,
     cache: RefCell<Option<VectorTextureCache>>,
+    pending: RefCell<Option<(u32, u32, u32, Instant)>>,
 }
 
 impl VectorSource {
@@ -55,6 +59,7 @@ impl VectorSource {
             document,
             page: 0,
             cache: RefCell::new(None),
+            pending: RefCell::new(None),
         }
     }
 
@@ -70,6 +75,7 @@ impl VectorSource {
         if page < self.document.page_count() {
             self.page = page;
             *self.cache.borrow_mut() = None;
+            *self.pending.borrow_mut() = None;
         }
     }
 
@@ -86,8 +92,7 @@ impl VectorSource {
         let max_side = ctx
             .input(|input| input.max_texture_side)
             .clamp(1, MAX_TEXTURE_SIDE as usize) as u32;
-        let width = (content_size.x * ppp).round().clamp(1.0, max_side as f32) as u32;
-        let height = (content_size.y * ppp).round().clamp(1.0, max_side as f32) as u32;
+        let (width, height) = capped_texture_size(content_size, ppp, max_side);
         let rotation = normalize_degrees(rotation_deg);
         let rotation_bits = rotation.to_bits();
         if let Some(cache) = self.cache.borrow().as_ref() {
@@ -95,7 +100,33 @@ impl VectorSource {
                 && cache.height == height
                 && cache.rotation_bits == rotation_bits
             {
+                *self.pending.borrow_mut() = None;
                 return Some(cache.texture.id());
+            }
+            // Reusing a texture with a different rotation or page aspect would
+            // visibly stretch it. Only debounce pure zoom changes.
+            if cache.rotation_bits == rotation_bits {
+                let mut pending = self.pending.borrow_mut();
+                let now = Instant::now();
+                match pending.as_ref() {
+                    Some((pending_w, pending_h, pending_rotation, since))
+                        if *pending_w == width
+                            && *pending_h == height
+                            && *pending_rotation == rotation_bits =>
+                    {
+                        let elapsed = now.saturating_duration_since(*since);
+                        if elapsed < VECTOR_RENDER_DEBOUNCE {
+                            let remaining = VECTOR_RENDER_DEBOUNCE - elapsed;
+                            ctx.request_repaint_after(remaining);
+                            return Some(cache.texture.id());
+                        }
+                    }
+                    _ => {
+                        *pending = Some((width, height, rotation_bits, now));
+                        ctx.request_repaint_after(VECTOR_RENDER_DEBOUNCE);
+                        return Some(cache.texture.id());
+                    }
+                }
             }
         }
 
@@ -106,9 +137,11 @@ impl VectorSource {
             Ok(image) => image,
             Err(error) => {
                 tracing::warn!("failed to render vector source: {error}");
+                *self.pending.borrow_mut() = None;
                 return None;
             }
         };
+        *self.pending.borrow_mut() = None;
         let color_image = egui::ColorImage::from_rgba_unmultiplied(
             [image.width as usize, image.height as usize],
             &image.pixels,
@@ -482,6 +515,18 @@ impl SourceImage {
             self.rotation_deg
         )
     }
+}
+
+fn capped_texture_size(size: egui::Vec2, ppp: f32, max_side: u32) -> (u32, u32) {
+    let mut width = (size.x * ppp).round().max(1.0) as u32;
+    let mut height = (size.y * ppp).round().max(1.0) as u32;
+    let max_dim = width.max(height);
+    if max_dim > max_side {
+        let scale = max_side as f32 / max_dim as f32;
+        width = (width as f32 * scale).round().max(1.0) as u32;
+        height = (height as f32 * scale).round().max(1.0) as u32;
+    }
+    (width, height)
 }
 
 fn is_vector(path: &Path) -> bool {
@@ -1041,6 +1086,15 @@ mod tests {
             let source = SourceImage::load(&ctx, path).unwrap();
             assert_eq!(source.vector_page_count(), pages, "{name}");
         }
+    }
+
+    #[test]
+    fn capping_the_vector_texture_preserves_aspect() {
+        let size = egui::vec2(2252.8, 1689.6);
+        let (width, height) = capped_texture_size(size, 2.0, 4096);
+        assert_eq!(width, 4096);
+        assert_eq!(height, 3072);
+        assert!((width as f32 / height as f32 - 4.0 / 3.0).abs() < 1e-4);
     }
 
     #[test]

@@ -126,7 +126,8 @@ impl YuetuApp {
             .add_filter(
                 "图片",
                 &[
-                    "png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff", "svg",
+                    "png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff", "svg", "pdf", "ai",
+                    "eps",
                 ],
             )
             .pick_file()
