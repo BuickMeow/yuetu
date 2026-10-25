@@ -458,11 +458,16 @@ fn render_eps_view(
     let page_y1 = transform.f + transform.d * page_height;
     let (page_x0, page_x1) = (transform.e.min(page_x1), transform.e.max(page_x1));
     let (page_y0, page_y1) = (transform.f.min(page_y1), transform.f.max(page_y1));
+    // Keep only pixels fully inside the page. A fractional page boundary
+    // otherwise leaves the one-pixel white paper fringe that stet composites
+    // around the page when it is scaled down.
+    let page_x0 = page_x0.ceil().clamp(0.0, width as f32) as u32;
+    let page_x1 = page_x1.floor().clamp(0.0, width as f32) as u32;
+    let page_y0 = page_y0.ceil().clamp(0.0, height as f32) as u32;
+    let page_y1 = page_y1.floor().clamp(0.0, height as f32) as u32;
     for y in 0..height {
         for x in 0..width {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            if px < page_x0 || px >= page_x1 || py < page_y0 || py >= page_y1 {
+            if x < page_x0 || x >= page_x1 || y < page_y0 || y >= page_y1 {
                 image.set_pixel(x, y, yuetu_core::Color::TRANSPARENT);
             }
         }
@@ -740,6 +745,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outside.pixel(10, 10).unwrap().a, 0);
+        assert_eq!(outside.pixel(99, 74).unwrap().a, 0);
+        assert_eq!(outside.pixel(300, 225).unwrap().a, 0);
+
+        let fractional = document
+            .render_page_view(
+                0,
+                400,
+                300,
+                ViewTransform {
+                    a: 0.5,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 0.5,
+                    e: 100.5,
+                    f: 75.5,
+                },
+            )
+            .unwrap();
+        // The half-covered first/last pixels are removed instead of leaking a
+        // white paper fringe from stet's compositor.
+        assert_eq!(fractional.pixel(100, 100).unwrap().a, 0);
+        assert_eq!(fractional.pixel(300, 225).unwrap().a, 0);
     }
 
     #[test]
