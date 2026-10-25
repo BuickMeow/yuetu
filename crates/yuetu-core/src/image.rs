@@ -4,12 +4,14 @@
 //! `image` crate's `RgbaImage`. The conversion pipeline only uses this type;
 //! `egui::ColorImage` / GPU textures are a UI concern.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use image::AnimationDecoder;
 
 use crate::color::Color;
 use crate::error::{Error, Result};
+use crate::palette::Palette;
 
 /// Decoded frames from a still image or an animated GIF/WebP.
 #[derive(Clone, Debug)]
@@ -17,10 +19,17 @@ pub struct ImageSequence {
     pub frames: Vec<RgbaImage>,
     /// Per-frame delay in milliseconds; the static-image case has one zero.
     pub delays_ms: Vec<u32>,
+    /// Exact visible colors across all frames, when there are at most 256.
+    /// Indexed sources (GIF, indexed PNG) naturally map onto this set; unused
+    /// palette entries and transparent pixels are omitted.
+    pub original_palette: Option<Palette>,
 }
 
 const MAX_ANIMATION_FRAMES: usize = 1024;
 const MAX_ANIMATION_BYTES: usize = 512 * 1024 * 1024;
+/// Indexed formats are limited to 256 entries. The same limit keeps manual
+/// palette lookup and the number of MIDI tracks bounded for other sources.
+const MAX_ORIGINAL_PALETTE_COLORS: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct RgbaImage {
@@ -129,9 +138,12 @@ fn decode_still(path: &Path) -> Result<ImageSequence> {
 fn sequence_from_dynamic(decoded: image::DynamicImage) -> Result<ImageSequence> {
     let rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
+    let frames = vec![RgbaImage::from_rgba(width, height, rgba.into_raw())?];
+    let original_palette = exact_source_palette(&frames);
     Ok(ImageSequence {
-        frames: vec![RgbaImage::from_rgba(width, height, rgba.into_raw())?],
+        frames,
         delays_ms: vec![0],
+        original_palette,
     })
 }
 
@@ -173,7 +185,38 @@ fn decode_animation<'a>(decoder: impl AnimationDecoder<'a>) -> Result<ImageSeque
         return Err(Error::InvalidImage("动画没有可解码的帧".into()));
     }
 
-    Ok(ImageSequence { frames, delays_ms })
+    let original_palette = exact_source_palette(&frames);
+    Ok(ImageSequence {
+        frames,
+        delays_ms,
+        original_palette,
+    })
+}
+
+/// Collect the exact visible RGBA colors used by any frame.
+///
+/// For indexed sources this is the used subset of the file's palette: no
+/// clustering or resampling happens. Returns `None` once the source exceeds
+/// 256 colors, which is also the maximum for GIF/indexed PNG. Partially
+/// transparent pixels below the converter's visibility threshold are ignored.
+fn exact_source_palette(frames: &[RgbaImage]) -> Option<Palette> {
+    let mut seen = HashSet::new();
+    let mut colors = Vec::new();
+    for frame in frames {
+        for px in frame.pixels.chunks_exact(4) {
+            if px[3] < 128 {
+                continue;
+            }
+            let key = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
+            if seen.insert(key) {
+                colors.push(Color::rgba(px[0], px[1], px[2], px[3]));
+                if colors.len() > MAX_ORIGINAL_PALETTE_COLORS {
+                    return None;
+                }
+            }
+        }
+    }
+    (!colors.is_empty()).then_some(Palette::new(colors))
 }
 
 /// Decode the first frame of a raster image into RGBA8.
@@ -188,4 +231,41 @@ pub fn load_image_from_memory(bytes: &[u8]) -> Result<RgbaImage> {
     let rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
     RgbaImage::from_rgba(width, height, rgba.into_raw())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_palette_deduplicates_frames_and_skips_transparency() {
+        let mut first = RgbaImage::new(2, 1, Color::rgb(255, 0, 0));
+        first.set_pixel(1, 0, Color::TRANSPARENT);
+        let second = RgbaImage::new(1, 1, Color::rgb(0, 0, 255));
+        let palette = exact_source_palette(&[first, second]).unwrap();
+        assert_eq!(
+            palette.colors,
+            vec![Color::rgb(255, 0, 0), Color::rgb(0, 0, 255)]
+        );
+    }
+
+    #[test]
+    fn exact_palette_is_not_offered_above_256_colors() {
+        let mut image = RgbaImage::new(257, 1, Color::BLACK);
+        for x in 0..257u32 {
+            image.set_pixel(
+                x,
+                0,
+                Color::rgb((x & 0xFF) as u8, ((x >> 1) & 0xFF) as u8, 0),
+            );
+        }
+        // 257 entries exceed the indexed-format limit, so the source falls
+        // back to automatic palette generation.
+        assert!(exact_source_palette(&[image]).is_none());
+    }
+
+    #[test]
+    fn exact_palette_requires_at_least_one_visible_color() {
+        assert!(exact_source_palette(&[RgbaImage::new(2, 2, Color::TRANSPARENT)]).is_none());
+    }
 }

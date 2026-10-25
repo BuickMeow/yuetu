@@ -46,3 +46,23 @@ fn sparse_fixture_keeps_its_transparent_background() {
     assert_eq!(frame.pixel(0, 0).map(|color| color.a), Some(0));
     assert_eq!(frame.pixel(400, 400).map(|color| color.a), Some(255));
 }
+
+#[test]
+fn fixtures_expose_exact_original_palettes() {
+    for name in [
+        "grid800.png",
+        "sparse800.png",
+        "ruler-test.png",
+        "frames40.gif",
+        "frames300.gif",
+        "shared-palette.gif",
+        "scrub30.gif",
+    ] {
+        let path = PathBuf::from(TESTDATA).join(name);
+        let sequence = load_image_sequence(&path).unwrap();
+        let palette = sequence
+            .original_palette
+            .unwrap_or_else(|| panic!("missing original palette for {name}"));
+        assert!(!palette.is_empty(), "empty original palette for {name}");
+    }
+}

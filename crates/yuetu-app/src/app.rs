@@ -151,6 +151,9 @@ impl YuetuApp {
                     "已加载 {} · {} × {} px",
                     source.name, source.display_size.0, source.display_size.1
                 ));
+                if source.original_palette().is_none() {
+                    self.settings.use_original_palette = false;
+                }
                 self.source = Some(source);
                 self.source_revision = self.source_revision.wrapping_add(1);
                 self.preview = None;
@@ -186,7 +189,7 @@ impl YuetuApp {
             return;
         }
 
-        let config = self.settings.conversion_config();
+        let config = self.conversion_config();
         let seed = self.conversion_seed(&config);
         let seed_has_palette = seed
             .as_ref()
@@ -205,6 +208,7 @@ impl YuetuApp {
                 None
             };
         let need_palette_frames = config.palette_scope == PaletteScope::AllFrames
+            && config.manual_palette.is_none()
             && shared_palette.is_none()
             && !seed_has_palette;
         let palette_frames = if need_palette_frames {
@@ -248,6 +252,21 @@ impl YuetuApp {
                 self.status = StatusMessage::error(format!("无法启动转换任务：{error}"));
             }
         }
+    }
+
+    /// Resolve the effective conversion config. The source palette is injected
+    /// here so `Settings` stays source-independent and all config comparisons
+    /// naturally see the manual palette.
+    fn conversion_config(&self) -> ConversionConfig {
+        let mut config = self.settings.conversion_config();
+        if self.settings.use_original_palette {
+            config.manual_palette = self
+                .source
+                .as_ref()
+                .and_then(SourceImage::original_palette)
+                .cloned();
+        }
+        config
     }
 
     /// Build a stage-cache seed from the current preview when its upstream
@@ -313,7 +332,7 @@ impl YuetuApp {
             return;
         }
 
-        let config = self.settings.conversion_config();
+        let config = self.conversion_config();
         // A job for exactly these settings and source frame is already doing
         // the work.
         if self.jobs.is_running()
@@ -401,7 +420,7 @@ impl YuetuApp {
         let image = std::sync::Arc::clone(source.interaction_image());
         let full_source_size = source.display_size;
         let stage = self.stage;
-        let config = self.settings.conversion_config();
+        let config = self.conversion_config();
         let Some(preview) = self.preview.as_mut() else {
             return;
         };
@@ -427,7 +446,7 @@ impl YuetuApp {
     }
 
     fn ensure_preview_notes(&mut self) -> bool {
-        let config = self.settings.conversion_config();
+        let config = self.conversion_config();
         let Some(preview) = self.preview.as_mut() else {
             return false;
         };
@@ -487,7 +506,7 @@ impl YuetuApp {
                     let config = self.job_config.take().unwrap_or_default();
                     let source_revision = self.job_source_revision.take().unwrap_or_default();
                     let job_source_generation = self.job_source_generation.take();
-                    let current = self.settings.conversion_config();
+                    let current = self.conversion_config();
                     let had_preview = self.preview.is_some();
                     self.job_progress = None;
                     tracing::debug!(
@@ -586,7 +605,7 @@ impl YuetuApp {
             self.status = StatusMessage::warning("暂无可导出的预览");
             return;
         };
-        if preview.config != self.settings.conversion_config()
+        if preview.config != self.conversion_config()
             || preview.source_revision != self.source_revision
         {
             self.status = StatusMessage::warning("预览正在更新，请稍候");
@@ -658,7 +677,7 @@ impl YuetuApp {
     }
 
     fn preview_is_current(&self) -> bool {
-        let config = self.settings.conversion_config();
+        let config = self.conversion_config();
         self.preview.as_ref().is_some_and(|preview| {
             preview.config == config && preview.source_revision == self.source_revision
         })
@@ -699,7 +718,7 @@ impl eframe::App for YuetuApp {
         let root_rect = ui.max_rect();
         let total_width = root_rect.width();
         self.clamp_panel_widths(total_width);
-        let config_before = self.settings.conversion_config();
+        let config_before = self.conversion_config();
         let updating = self.jobs.is_running() || self.auto_convert_at.is_some();
         let can_export = self.preview_is_current();
 
@@ -962,7 +981,7 @@ impl eframe::App for YuetuApp {
         }
 
         if self.source.is_some()
-            && self.settings.conversion_config() != config_before
+            && self.conversion_config() != config_before
             && controls_action.live_setting.is_none()
             && !self.settings_scrub_pending
         {
@@ -972,7 +991,7 @@ impl eframe::App for YuetuApp {
         }
         if self.settings_scrub_pending && !ctx.input(|input| input.pointer.primary_down()) {
             self.settings_scrub_pending = false;
-            if self.source.is_some() && self.settings.conversion_config() != config_before {
+            if self.source.is_some() && self.conversion_config() != config_before {
                 self.status = StatusMessage::info("正在更新预览…");
                 self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
             } else {

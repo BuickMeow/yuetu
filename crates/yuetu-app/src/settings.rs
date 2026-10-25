@@ -42,6 +42,7 @@ pub struct Settings {
     pub key_filter: KeyFilter,
     pub column_mapping: ColumnMapping,
     pub palette_colors: usize,
+    pub use_original_palette: bool,
     pub resize: ResizeAlgorithm,
     pub rotation_deg: f32,
     pub time_axis: TimeAxis,
@@ -67,6 +68,7 @@ impl Default for Settings {
             key_filter: KeyFilter::All,
             column_mapping: ColumnMapping::Filled,
             palette_colors: 16,
+            use_original_palette: false,
             resize: ResizeAlgorithm::Area,
             rotation_deg: 0.0,
             time_axis: TimeAxis::Vertical,
@@ -219,6 +221,7 @@ mod tests {
         assert_eq!(settings.length_mode, LengthMode::Source);
         assert_eq!(settings.conversion_config().time_length, TimeLength::Source);
         assert_eq!(settings.valid_time_signature(), TimeSignature::default());
+        assert!(!settings.use_original_palette);
     }
 
     #[test]

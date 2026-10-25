@@ -44,6 +44,7 @@ pub struct SourceImage {
     pub has_transparency: bool,
     frames: Vec<Arc<RgbaImage>>,
     delays_ms: Vec<u32>,
+    original_palette: Option<Palette>,
     frame_index: usize,
     rotation_deg: f32,
     thumbnails: Vec<Option<Thumbnail>>,
@@ -53,7 +54,11 @@ pub struct SourceImage {
 
 impl SourceImage {
     pub fn load(ctx: &egui::Context, path: PathBuf) -> yuetu_core::Result<Self> {
-        let ImageSequence { frames, delays_ms } = load_image_sequence(&path)?;
+        let ImageSequence {
+            frames,
+            delays_ms,
+            original_palette,
+        } = load_image_sequence(&path)?;
         let frames: Vec<Arc<RgbaImage>> = frames.into_iter().map(Arc::new).collect();
         let image = frames[0].clone();
         let (display_image, display_size) = prepare_display(ctx, &image, 0.0)?;
@@ -79,6 +84,7 @@ impl SourceImage {
             has_transparency,
             frames,
             delays_ms,
+            original_palette,
             frame_index: 0,
             rotation_deg: 0.0,
             thumbnails: std::iter::repeat_with(|| None)
@@ -103,6 +109,10 @@ impl SourceImage {
 
     pub fn palette_frames(&self) -> &[Arc<RgbaImage>] {
         &self.frames
+    }
+
+    pub fn original_palette(&self) -> Option<&Palette> {
+        self.original_palette.as_ref()
     }
 
     pub fn interaction_image(&self) -> &Arc<RgbaImage> {
@@ -755,6 +765,7 @@ mod tests {
             has_transparency: false,
             frames,
             delays_ms: vec![100, 100],
+            original_palette: None,
             frame_index: 0,
             rotation_deg: 0.0,
             thumbnails: vec![None, None],

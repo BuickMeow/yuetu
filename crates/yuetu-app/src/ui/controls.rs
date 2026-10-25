@@ -312,14 +312,27 @@ pub fn show(
             ui.add_space(10.0);
             let (_, rect) = card_with_rect(ui, |ui| {
                 section_title(ui, "调色板");
-                setting_row(ui, "颜色数", |ui| {
-                    let response = ui.add(
-                        egui::DragValue::new(&mut settings.palette_colors)
-                            .range(1..=256)
-                            .speed(1.0),
+                let has_original_palette = source.and_then(SourceImage::original_palette).is_some();
+                setting_row(ui, "使用原图色板", |ui| {
+                    ui.add_enabled(
+                        has_original_palette,
+                        egui::Checkbox::without_text(&mut settings.use_original_palette),
                     );
-                    if response.dragged() {
-                        action.live_setting = Some(LiveSetting::Palette);
+                });
+                setting_row(ui, "颜色数", |ui| {
+                    if settings.use_original_palette {
+                        if let Some(palette) = source.and_then(SourceImage::original_palette) {
+                            ui.label(palette.len().to_string());
+                        }
+                    } else {
+                        let response = ui.add(
+                            egui::DragValue::new(&mut settings.palette_colors)
+                                .range(1..=256)
+                                .speed(1.0),
+                        );
+                        if response.dragged() {
+                            action.live_setting = Some(LiveSetting::Palette);
+                        }
                     }
                 });
                 if let Some(preview) = preview {
