@@ -35,16 +35,56 @@ struct PageInfo {
     height: f32,
 }
 
+struct EpsBackend {
+    pages: Vec<stet::DisplayListPage>,
+}
+
 enum Backend {
     Svg(usvg::Tree),
     Pdf(hayro::hayro_syntax::Pdf),
-    Eps(Vec<u8>),
+    Eps(EpsBackend),
 }
 
 pub struct VectorDocument {
     format: VectorFormat,
     backend: Backend,
     pages: Vec<PageInfo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewTransform {
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
+    pub e: f32,
+    pub f: f32,
+}
+
+impl ViewTransform {
+    pub const IDENTITY: Self = Self {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    fn tiny_skia(self) -> tiny_skia::Transform {
+        tiny_skia::Transform::from_row(self.a, self.b, self.c, self.d, self.e, self.f)
+    }
+
+    fn kurbo(self) -> hayro::kurbo::Affine {
+        hayro::kurbo::Affine::new([
+            f64::from(self.a),
+            f64::from(self.b),
+            f64::from(self.c),
+            f64::from(self.d),
+            f64::from(self.e),
+            f64::from(self.f),
+        ])
+    }
 }
 
 impl VectorDocument {
@@ -94,7 +134,7 @@ impl VectorDocument {
                 .suppress_output()
                 .build();
             let rendered = interpreter
-                .render(&bytes, 72.0)
+                .render_to_display_list(&bytes, 72.0)
                 .map_err(|error| VectorError::Parse(error.to_string()))?;
             let pages = rendered
                 .iter()
@@ -114,7 +154,7 @@ impl VectorDocument {
                 } else {
                     VectorFormat::Eps
                 },
-                backend: Backend::Eps(bytes),
+                backend: Backend::Eps(EpsBackend { pages: rendered }),
                 pages,
             });
         }
@@ -146,6 +186,37 @@ impl VectorDocument {
 
     pub fn page_size(&self, page: usize) -> Option<(f32, f32)> {
         self.pages.get(page).map(|page| (page.width, page.height))
+    }
+
+    /// Whether the backend can render an arbitrary cropped view instead of a
+    /// full page. EPS currently uses the full-page fallback.
+    pub fn supports_view_render(&self) -> bool {
+        true
+    }
+
+    /// Render the page using a page-user-unit -> output-pixel transform. Only
+    /// the pixels needed by the viewport are touched; this is what keeps deep
+    /// zoom from being limited by a full-page texture.
+    pub fn render_page_view(
+        &self,
+        page: usize,
+        width: u32,
+        height: u32,
+        transform: ViewTransform,
+    ) -> Result<RgbaImage, VectorError> {
+        if width == 0 || height == 0 {
+            return Err(VectorError::InvalidSize);
+        }
+        match &self.backend {
+            Backend::Svg(tree) => {
+                let mut pixmap =
+                    tiny_skia::Pixmap::new(width, height).ok_or(VectorError::InvalidSize)?;
+                resvg::render(tree, transform.tiny_skia(), &mut pixmap.as_mut());
+                Ok(pixmap_to_rgba(&pixmap))
+            }
+            Backend::Pdf(pdf) => render_pdf_page_view(pdf, page, width, height, transform),
+            Backend::Eps(eps) => render_eps_view(eps, page, width, height, transform),
+        }
     }
 
     /// Render the first page into a raster with the requested long side.
@@ -231,14 +302,7 @@ impl VectorDocument {
                 Ok(pixmap_to_rgba(&pixmap))
             }
             Backend::Pdf(pdf) => render_pdf_page(pdf, page, width, height),
-            Backend::Eps(bytes) => {
-                let page_width = self
-                    .pages
-                    .get(page)
-                    .map(|page| page.width)
-                    .ok_or(VectorError::InvalidPage)?;
-                render_eps_page(bytes, page, page_width, width, height)
-            }
+            Backend::Eps(eps) => render_eps_exact(eps, page, width, height),
         }
     }
 }
@@ -278,36 +342,113 @@ fn render_pdf_page(
     Ok(image)
 }
 
-fn render_eps_page(
-    bytes: &[u8],
+fn render_pdf_page_view(
+    pdf: &hayro::hayro_syntax::Pdf,
     page: usize,
-    page_width: f32,
+    width: u32,
+    height: u32,
+    transform: ViewTransform,
+) -> Result<RgbaImage, VectorError> {
+    let pages = pdf.pages();
+    let page = pages.get(page).ok_or(VectorError::InvalidPage)?;
+    if width > u32::from(u16::MAX) || height > u32::from(u16::MAX) {
+        return Err(VectorError::InvalidSize);
+    }
+    let settings = hayro::hayro_interpret::InterpreterSettings::default();
+    let render_settings = hayro::RenderSettings::default();
+    let cache = hayro::RenderCache::new();
+    let mut ctx = hayro::vello_cpu::RenderContext::new(width as u16, height as u16);
+    use hayro::hayro_interpret::util::TransformExt;
+    let page_transform = transform.kurbo() * page.initial_transform(true).to_kurbo();
+    hayro::render_into(
+        page,
+        &cache,
+        &settings,
+        &render_settings,
+        &mut ctx,
+        page_transform,
+    );
+    ctx.flush();
+    let mut pixmap = hayro::vello_cpu::Pixmap::new(ctx.width(), ctx.height());
+    let mut resources = hayro::vello_cpu::Resources::default();
+    ctx.render_with(
+        &mut pixmap,
+        &mut resources,
+        hayro::vello_cpu::RasterizerSettings {
+            target_init: hayro::vello_cpu::TargetInit::Clear(
+                hayro::vello_cpu::color::palette::css::TRANSPARENT,
+            ),
+            ..Default::default()
+        },
+    );
+    Ok(vello_pixmap_to_rgba(&pixmap))
+}
+
+fn render_eps_exact(
+    eps: &EpsBackend,
+    page: usize,
     width: u32,
     height: u32,
 ) -> Result<RgbaImage, VectorError> {
-    let mut interpreter = stet::Interpreter::builder()
-        .page_background(stet::PageBackground::Transparent)
-        .suppress_output()
-        .build();
-    if page_width <= 0.0 {
+    let page = eps.pages.get(page).ok_or(VectorError::InvalidPage)?;
+    if page.width == 0 || page.height == 0 {
         return Err(VectorError::InvalidSize);
     }
-    let dpi = 72.0 * width as f64 / page_width as f64;
-    let rendered = interpreter
-        .render(bytes, dpi)
-        .map_err(|error| VectorError::Parse(error.to_string()))?;
-    let rendered_page = rendered.get(page).ok_or(VectorError::InvalidPage)?;
-    let image = RgbaImage::from_rgba(
-        rendered_page.width,
-        rendered_page.height,
-        rendered_page.rgba.clone(),
-    )
-    .map_err(|error| VectorError::Parse(error.to_string()))?;
-    if image.width != width || image.height != height {
-        Ok(center_into_resized(image, width, height))
-    } else {
-        Ok(image)
+    let prepared = stet::prepare_display_list(&page.display_list);
+    let rgba = stet::render_region_prepared(
+        &page.display_list,
+        &prepared,
+        0.0,
+        0.0,
+        page.width as f64,
+        page.height as f64,
+        width,
+        height,
+        72.0,
+        None,
+        None,
+        false,
+    );
+    RgbaImage::from_rgba(width, height, rgba).map_err(|error| VectorError::Parse(error.to_string()))
+}
+
+fn render_eps_view(
+    eps: &EpsBackend,
+    page: usize,
+    width: u32,
+    height: u32,
+    transform: ViewTransform,
+) -> Result<RgbaImage, VectorError> {
+    let page = eps.pages.get(page).ok_or(VectorError::InvalidPage)?;
+    // The stet region renderer works on axis-aligned regions. Rotated
+    // PostScript pages fall back to the full-page texture path.
+    if transform.b.abs() > 1e-4
+        || transform.c.abs() > 1e-4
+        || transform.a <= 0.0
+        || transform.d <= 0.0
+    {
+        return Err(VectorError::Parse("EPS 旋转视口暂不支持".into()));
     }
+    let vp_x = (0.0 - transform.e) / transform.a;
+    let vp_y = (0.0 - transform.f) / transform.d;
+    let vp_w = width as f32 / transform.a;
+    let vp_h = height as f32 / transform.d;
+    let prepared = stet::prepare_display_list(&page.display_list);
+    let rgba = stet::render_region_prepared(
+        &page.display_list,
+        &prepared,
+        f64::from(vp_x),
+        f64::from(vp_y),
+        f64::from(vp_w),
+        f64::from(vp_h),
+        width,
+        height,
+        72.0,
+        None,
+        None,
+        false,
+    );
+    RgbaImage::from_rgba(width, height, rgba).map_err(|error| VectorError::Parse(error.to_string()))
 }
 
 fn vello_pixmap_to_rgba(pixmap: &hayro::vello_cpu::Pixmap) -> RgbaImage {
@@ -447,6 +588,99 @@ mod tests {
         assert_eq!(image.pixel(50, 50).unwrap().g, 255);
         assert_eq!(image.pixel(5, 50).unwrap().a, 0);
         assert_eq!(image.pixel(95, 50).unwrap().a, 0);
+    }
+
+    #[test]
+    fn svg_view_render_maps_the_page_transform() {
+        let document = fixture("vector-red.svg");
+        let image = document
+            .render_page_view(
+                0,
+                50,
+                50,
+                ViewTransform {
+                    a: 0.5,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 0.5,
+                    e: 0.0,
+                    f: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!((image.width, image.height), (50, 50));
+        assert_eq!(image.pixel(25, 25).unwrap().r, 255);
+        assert_eq!(image.pixel(25, 25).unwrap().a, 255);
+    }
+
+    #[test]
+    fn pdf_view_render_renders_a_crop() {
+        let document = fixture("vector.pdf");
+        let image = document
+            .render_page_view(
+                0,
+                200,
+                150,
+                ViewTransform {
+                    a: 0.5,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 0.5,
+                    e: 0.0,
+                    f: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!((image.width, image.height), (200, 150));
+        assert!(image.pixels.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn pdf_view_render_respects_translation_and_scale() {
+        let document = fixture("vector.pdf");
+        let image = document
+            .render_page_view(
+                0,
+                200,
+                200,
+                ViewTransform {
+                    a: 2.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 2.0,
+                    e: -120.0,
+                    f: -180.0,
+                },
+            )
+            .unwrap();
+        // The first page's red circle is centered at (130, 160) in PDF points.
+        let pixel = image.pixel(140, 140).unwrap();
+        assert!(pixel.r > 150, "{pixel:?}");
+        assert!(pixel.a > 200, "{pixel:?}");
+    }
+
+    #[test]
+    fn eps_view_render_renders_an_axis_aligned_crop() {
+        let document = fixture("vector.eps");
+        let image = document
+            .render_page_view(
+                0,
+                200,
+                150,
+                ViewTransform {
+                    a: 0.5,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 0.5,
+                    e: 0.0,
+                    f: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!((image.width, image.height), (200, 150));
+        let pixel = image.pixel(65, 80).unwrap();
+        assert!(pixel.r > 150, "{pixel:?}");
+        assert!(pixel.a > 200, "{pixel:?}");
     }
 
     #[test]

@@ -46,7 +46,20 @@ pub fn show(
                     source.display_size,
                     true,
                     checker_texture,
-                    |content| vector.texture(&ctx, content.size(), rotation),
+                    |interaction| {
+                        vector
+                            .draw(
+                                &ctx,
+                                interaction.content_rect,
+                                interaction.viewport,
+                                source.display_size,
+                                rotation,
+                            )
+                            .map(|draw| stage_image::TextureDraw {
+                                texture: draw.texture,
+                                rect: draw.rect,
+                            })
+                    },
                 )
             } else {
                 stage_image::show(

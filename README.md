@@ -74,6 +74,14 @@ crates/
 
 详细设计见 [`docs/architecture.md`](docs/architecture.md)。
 
+矢量视口与 GPU 基准：
+
+```bash
+cargo run --release -p yuetu-vector --example bench_view
+cargo run --release -p yuetu-vector --example bench_gpu
+cargo run --release -p yuetu-vector --example bench_gpu -- 4000 3000
+```
+
 ## 当前故意没做的事
 
 - 调色板只有 popularity 一种算法。后续按同一 `Palette` 接口加入 K-Means、Octree、抖动等。

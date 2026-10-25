@@ -12,6 +12,11 @@ pub struct RasterHover {
     pub y: u32,
 }
 
+pub struct TextureDraw {
+    pub texture: egui::TextureId,
+    pub rect: Rect,
+}
+
 pub fn show(
     ui: &mut Ui,
     view: &mut View2D,
@@ -28,7 +33,12 @@ pub fn show(
         grid_size,
         checkerboard,
         checker_texture,
-        |_| Some(texture),
+        |interaction| {
+            Some(TextureDraw {
+                texture,
+                rect: interaction.content_rect,
+            })
+        },
     )
 }
 
@@ -41,7 +51,7 @@ pub fn show_with_texture(
     grid_size: (u32, u32),
     checkerboard: bool,
     checker_texture: egui::TextureId,
-    texture: impl FnOnce(Rect) -> Option<egui::TextureId>,
+    texture: impl FnOnce(&crate::widgets::view2d::ViewInteraction) -> Option<TextureDraw>,
 ) -> Option<RasterHover> {
     let size = egui::vec2(display_size.0.max(1) as f32, display_size.1.max(1) as f32);
     let interaction = view.interact(ui, size, CursorIcon::Crosshair);
@@ -57,10 +67,10 @@ pub fn show_with_texture(
         );
     }
 
-    if let Some(texture) = texture(interaction.content_rect) {
+    if let Some(draw) = texture(&interaction) {
         painter.image(
-            texture,
-            interaction.content_rect,
+            draw.texture,
+            draw.rect,
             Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
         );

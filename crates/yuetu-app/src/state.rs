@@ -30,27 +30,58 @@ const VECTOR_RASTER_LONG_SIDE: u32 = 2048;
 /// Wait for zoom to settle before re-rasterizing the vector source. The old
 /// texture is reused (at the same aspect) while the gesture is active.
 const VECTOR_RENDER_DEBOUNCE: Duration = Duration::from_millis(80);
+/// Full-page texture used only while a new viewport crop is pending.
+const VECTOR_FALLBACK_SIDE: u32 = 2048;
 
 struct Thumbnail {
     texture: TextureHandle,
     size: egui::Vec2,
 }
 
-struct VectorTextureCache {
-    width: u32,
-    height: u32,
-    rotation_bits: u32,
+struct VectorViewCache {
+    key: VectorViewKey,
     texture: TextureHandle,
 }
 
+struct VectorFallbackCache {
+    key: VectorFallbackKey,
+    texture: TextureHandle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VectorViewKey {
+    width: u32,
+    height: u32,
+    page: u32,
+    rotation_bits: u32,
+    content: [i32; 4],
+    viewport: [i32; 4],
+    ppp_bits: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VectorFallbackKey {
+    page: u32,
+    rotation_bits: u32,
+    width: u32,
+    height: u32,
+}
+
+/// One texture draw for the source stage. Vector sources can cover the whole
+/// viewport with a cropped render instead of stretching a full-page texture.
+pub struct VectorDraw {
+    pub texture: egui::TextureId,
+    pub rect: egui::Rect,
+}
+
 /// A live vector source. The raster fields on `SourceImage` remain the
-/// deterministic conversion image; this cache only drives the source-stage
-/// display, re-rendering at the current viewport density.
+/// deterministic conversion image; this cache drives the source-stage display.
 pub struct VectorSource {
     document: VectorDocument,
     page: usize,
-    cache: RefCell<Option<VectorTextureCache>>,
-    pending: RefCell<Option<(u32, u32, u32, Instant)>>,
+    cache: RefCell<Option<VectorViewCache>>,
+    fallback: RefCell<Option<VectorFallbackCache>>,
+    pending: RefCell<Option<(VectorViewKey, Instant)>>,
 }
 
 impl VectorSource {
@@ -59,6 +90,7 @@ impl VectorSource {
             document,
             page: 0,
             cache: RefCell::new(None),
+            fallback: RefCell::new(None),
             pending: RefCell::new(None),
         }
     }
@@ -71,105 +103,197 @@ impl VectorSource {
         self.page
     }
 
+    fn page_size(&self) -> Option<(f32, f32)> {
+        self.document.page_size(self.page)
+    }
+
     fn set_page(&mut self, page: usize) {
         if page < self.document.page_count() {
             self.page = page;
             *self.cache.borrow_mut() = None;
+            *self.fallback.borrow_mut() = None;
             *self.pending.borrow_mut() = None;
         }
     }
 
-    pub fn texture(
+    fn ensure_fallback(
         &self,
         ctx: &egui::Context,
-        content_size: egui::Vec2,
+        display_size: (u32, u32),
         rotation_deg: f32,
+        max_side: u32,
     ) -> Option<egui::TextureId> {
-        if content_size.x <= 0.0 || content_size.y <= 0.0 {
+        let rotation = normalize_degrees(rotation_deg);
+        let (width, height) = fallback_dimensions(display_size, max_side);
+        if width == 0 || height == 0 {
             return None;
         }
-        let ppp = ctx.pixels_per_point();
-        let max_side = ctx
-            .input(|input| input.max_texture_side)
-            .clamp(1, MAX_TEXTURE_SIDE as usize) as u32;
-        let (width, height) = capped_texture_size(content_size, ppp, max_side);
-        let rotation = normalize_degrees(rotation_deg);
-        let rotation_bits = rotation.to_bits();
-        if let Some(cache) = self.cache.borrow().as_ref() {
-            if cache.width == width
-                && cache.height == height
-                && cache.rotation_bits == rotation_bits
-            {
-                *self.pending.borrow_mut() = None;
+        let key = VectorFallbackKey {
+            page: self.page as u32,
+            rotation_bits: rotation.to_bits(),
+            width,
+            height,
+        };
+        if let Some(cache) = self.fallback.borrow().as_ref() {
+            if cache.key == key {
                 return Some(cache.texture.id());
             }
-            // Reusing a texture with a different rotation or page aspect would
-            // visibly stretch it. Only debounce pure zoom changes.
-            if cache.rotation_bits == rotation_bits {
-                let mut pending = self.pending.borrow_mut();
-                let now = Instant::now();
-                match pending.as_ref() {
-                    Some((pending_w, pending_h, pending_rotation, since))
-                        if *pending_w == width
-                            && *pending_h == height
-                            && *pending_rotation == rotation_bits =>
-                    {
-                        let elapsed = now.saturating_duration_since(*since);
-                        if elapsed < VECTOR_RENDER_DEBOUNCE {
-                            let remaining = VECTOR_RENDER_DEBOUNCE - elapsed;
-                            ctx.request_repaint_after(remaining);
-                            return Some(cache.texture.id());
-                        }
-                    }
-                    _ => {
-                        *pending = Some((width, height, rotation_bits, now));
-                        ctx.request_repaint_after(VECTOR_RENDER_DEBOUNCE);
-                        return Some(cache.texture.id());
-                    }
-                }
-            }
         }
-
         let image = match self
             .document
             .render_page_rotated_to_fit(self.page, width, height, rotation)
         {
             Ok(image) => image,
             Err(error) => {
-                tracing::warn!("failed to render vector source: {error}");
-                *self.pending.borrow_mut() = None;
+                tracing::warn!("failed to render vector fallback: {error}");
                 return None;
             }
         };
-        *self.pending.borrow_mut() = None;
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+        let color = egui::ColorImage::from_rgba_unmultiplied(
             [image.width as usize, image.height as usize],
             &image.pixels,
         );
-        let options = TextureOptions {
-            magnification: TextureFilter::Linear,
-            minification: TextureFilter::Linear,
-            wrap_mode: TextureWrapMode::ClampToEdge,
-            mipmap_mode: None,
-        };
-        let mut cache = self.cache.borrow_mut();
-        if let Some(cache) = cache.as_mut() {
-            cache.texture.set(color_image, options);
-            cache.width = width;
-            cache.height = height;
-            cache.rotation_bits = rotation_bits;
+        let options = vector_texture_options();
+        let mut fallback = self.fallback.borrow_mut();
+        if let Some(cache) = fallback.as_mut() {
+            cache.texture.set(color, options);
+            cache.key = key;
             Some(cache.texture.id())
         } else {
-            let texture = ctx.load_texture("yuetu.vector.source", color_image, options);
+            let texture = ctx.load_texture("yuetu.vector.fallback", color, options);
             let id = texture.id();
-            *cache = Some(VectorTextureCache {
-                width,
-                height,
-                rotation_bits,
-                texture,
-            });
+            *fallback = Some(VectorFallbackCache { key, texture });
             Some(id)
         }
+    }
+
+    pub fn draw(
+        &self,
+        ctx: &egui::Context,
+        content: egui::Rect,
+        viewport: egui::Rect,
+        display_size: (u32, u32),
+        rotation_deg: f32,
+    ) -> Option<VectorDraw> {
+        if !content.is_positive() || !viewport.is_positive() {
+            return None;
+        }
+        let ppp = ctx.pixels_per_point();
+        let max_side = ctx
+            .input(|input| input.max_texture_side)
+            .clamp(1, MAX_TEXTURE_SIDE as usize) as u32;
+        let rotation = normalize_degrees(rotation_deg);
+        let fallback = self.ensure_fallback(ctx, display_size, rotation, max_side)?;
+        if !self.document.supports_view_render() {
+            return Some(VectorDraw {
+                texture: fallback,
+                rect: content,
+            });
+        }
+        let page_size = self.page_size()?;
+        let (width, height) = capped_texture_size(viewport.size(), ppp, max_side);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let key = VectorViewKey {
+            width,
+            height,
+            page: self.page as u32,
+            rotation_bits: rotation.to_bits(),
+            content: [
+                (content.left() * ppp).round() as i32,
+                (content.top() * ppp).round() as i32,
+                (content.right() * ppp).round() as i32,
+                (content.bottom() * ppp).round() as i32,
+            ],
+            viewport: [
+                (viewport.left() * ppp).round() as i32,
+                (viewport.top() * ppp).round() as i32,
+                (viewport.right() * ppp).round() as i32,
+                (viewport.bottom() * ppp).round() as i32,
+            ],
+            ppp_bits: ppp.to_bits(),
+        };
+        if let Some(cache) = self.cache.borrow().as_ref() {
+            if cache.key == key {
+                *self.pending.borrow_mut() = None;
+                return Some(VectorDraw {
+                    texture: cache.texture.id(),
+                    rect: viewport,
+                });
+            }
+        }
+
+        let now = Instant::now();
+        {
+            let mut pending = self.pending.borrow_mut();
+            match pending.as_ref() {
+                Some((pending_key, since)) if *pending_key == key => {
+                    let elapsed = now.saturating_duration_since(*since);
+                    if elapsed < VECTOR_RENDER_DEBOUNCE {
+                        ctx.request_repaint_after(VECTOR_RENDER_DEBOUNCE - elapsed);
+                        return Some(VectorDraw {
+                            texture: fallback,
+                            rect: content,
+                        });
+                    }
+                }
+                _ => {
+                    *pending = Some((key, now));
+                    ctx.request_repaint_after(VECTOR_RENDER_DEBOUNCE);
+                    return Some(VectorDraw {
+                        texture: fallback,
+                        rect: content,
+                    });
+                }
+            }
+        }
+
+        let out_scale_x = width as f32 / (viewport.width() * ppp).max(1e-6);
+        let out_scale_y = height as f32 / (viewport.height() * ppp).max(1e-6);
+        let transform = vector_view_transform(
+            page_size,
+            content,
+            viewport,
+            rotation,
+            out_scale_x,
+            out_scale_y,
+        );
+        let image = match self
+            .document
+            .render_page_view(self.page, width, height, transform)
+        {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::warn!("failed to render vector viewport: {error}");
+                *self.pending.borrow_mut() = None;
+                return Some(VectorDraw {
+                    texture: fallback,
+                    rect: content,
+                });
+            }
+        };
+        *self.pending.borrow_mut() = None;
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [image.width as usize, image.height as usize],
+            &image.pixels,
+        );
+        let options = vector_texture_options();
+        let mut cache = self.cache.borrow_mut();
+        let id = if let Some(cache) = cache.as_mut() {
+            cache.texture.set(color, options);
+            cache.key = key;
+            cache.texture.id()
+        } else {
+            let texture = ctx.load_texture("yuetu.vector.view", color, options);
+            let id = texture.id();
+            *cache = Some(VectorViewCache { key, texture });
+            id
+        };
+        Some(VectorDraw {
+            texture: id,
+            rect: viewport,
+        })
     }
 }
 
@@ -527,6 +651,61 @@ fn capped_texture_size(size: egui::Vec2, ppp: f32, max_side: u32) -> (u32, u32) 
         height = (height as f32 * scale).round().max(1.0) as u32;
     }
     (width, height)
+}
+
+fn vector_texture_options() -> TextureOptions {
+    TextureOptions {
+        magnification: TextureFilter::Linear,
+        minification: TextureFilter::Linear,
+        wrap_mode: TextureWrapMode::ClampToEdge,
+        mipmap_mode: None,
+    }
+}
+
+fn fallback_dimensions(display_size: (u32, u32), max_side: u32) -> (u32, u32) {
+    let max_side = max_side.min(VECTOR_FALLBACK_SIDE).max(1);
+    let width = display_size.0.max(1);
+    let height = display_size.1.max(1);
+    if width >= height {
+        (
+            max_side,
+            ((max_side as f32 * height as f32 / width as f32).round() as u32).max(1),
+        )
+    } else {
+        (
+            ((max_side as f32 * width as f32 / height as f32).round() as u32).max(1),
+            max_side,
+        )
+    }
+}
+
+fn vector_view_transform(
+    page_size: (f32, f32),
+    content: egui::Rect,
+    viewport: egui::Rect,
+    rotation: f32,
+    out_scale_x: f32,
+    out_scale_y: f32,
+) -> yuetu_vector::ViewTransform {
+    let (page_w, page_h) = page_size;
+    let radians = rotation.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let rotated_w = page_w * cos.abs() + page_h * sin.abs();
+    let rotated_h = page_w * sin.abs() + page_h * cos.abs();
+    let sx = content.width() / rotated_w.max(1e-6) * out_scale_x;
+    let sy = content.height() / rotated_h.max(1e-6) * out_scale_y;
+    let ex = rotated_w * 0.5 - cos * page_w * 0.5 + sin * page_h * 0.5;
+    let ey = rotated_h * 0.5 - sin * page_w * 0.5 - cos * page_h * 0.5;
+    let tx = (content.left() - viewport.left()) * out_scale_x;
+    let ty = (content.top() - viewport.top()) * out_scale_y;
+    yuetu_vector::ViewTransform {
+        a: sx * cos,
+        b: sy * sin,
+        c: -sx * sin,
+        d: sy * cos,
+        e: sx * ex + tx,
+        f: sy * ey + ty,
+    }
 }
 
 fn is_vector(path: &Path) -> bool {
@@ -1085,6 +1264,20 @@ mod tests {
                 PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata")).join(name);
             let source = SourceImage::load(&ctx, path).unwrap();
             assert_eq!(source.vector_page_count(), pages, "{name}");
+        }
+    }
+
+    #[test]
+    fn vector_view_transform_keeps_the_page_center_centered() {
+        let content = egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(900.0, 650.0));
+        let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 800.0));
+        for rotation in [0.0, 37.0, 90.0, -45.0] {
+            let transform =
+                vector_view_transform((400.0, 300.0), content, viewport, rotation, 1.0, 1.0);
+            let x = transform.a * 200.0 + transform.c * 150.0 + transform.e;
+            let y = transform.b * 200.0 + transform.d * 150.0 + transform.f;
+            assert!((x - content.center().x).abs() < 0.01, "{rotation}");
+            assert!((y - content.center().y).abs() < 0.01, "{rotation}");
         }
     }
 
