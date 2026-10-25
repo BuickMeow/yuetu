@@ -125,7 +125,9 @@ impl YuetuApp {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
                 "图片",
-                &["png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff"],
+                &[
+                    "png", "jpg", "jpeg", "bmp", "gif", "webp", "tif", "tiff", "svg",
+                ],
             )
             .pick_file()
         {

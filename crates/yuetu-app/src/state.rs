@@ -1,7 +1,8 @@
 //! Application state that outlives a single frame.
 
 use egui::{TextureFilter, TextureHandle, TextureOptions, TextureWrapMode};
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use yuetu_core::resize::resize;
@@ -10,6 +11,7 @@ use yuetu_core::{
     ResizeAlgorithm, RgbaImage, TimeAxis, generate_notes_on_grid, load_image_sequence,
     normalize_degrees, quantize, resolve_time_rows, rotate_image, rotated_dimensions,
 };
+use yuetu_vector::VectorDocument;
 
 use crate::widgets::midi_gpu::MidiGpuData;
 
@@ -22,10 +24,100 @@ const THUMBNAIL_MAX_SIDE: u32 = 96;
 /// Working-resolution source used by stage previews while scrubbing. The
 /// final conversion still uses the original image.
 const INTERACTION_MAX_SIDE: u32 = 1024;
+/// Rasterization width used by the existing pixel pipeline for SVG sources.
+/// Display rendering is independent and follows the viewport zoom.
+const VECTOR_RASTER_LONG_SIDE: u32 = 2048;
 
 struct Thumbnail {
     texture: TextureHandle,
     size: egui::Vec2,
+}
+
+struct VectorTextureCache {
+    width: u32,
+    height: u32,
+    rotation_bits: u32,
+    texture: TextureHandle,
+}
+
+/// A live vector source. The raster fields on `SourceImage` remain the
+/// deterministic conversion image; this cache only drives the source-stage
+/// display, re-rendering at the current viewport density.
+pub struct VectorSource {
+    document: VectorDocument,
+    cache: RefCell<Option<VectorTextureCache>>,
+}
+
+impl VectorSource {
+    fn new(document: VectorDocument) -> Self {
+        Self {
+            document,
+            cache: RefCell::new(None),
+        }
+    }
+
+    pub fn texture(
+        &self,
+        ctx: &egui::Context,
+        content_size: egui::Vec2,
+        rotation_deg: f32,
+    ) -> Option<egui::TextureId> {
+        if content_size.x <= 0.0 || content_size.y <= 0.0 {
+            return None;
+        }
+        let ppp = ctx.pixels_per_point();
+        let max_side = ctx
+            .input(|input| input.max_texture_side)
+            .clamp(1, MAX_TEXTURE_SIDE as usize) as u32;
+        let width = (content_size.x * ppp).round().clamp(1.0, max_side as f32) as u32;
+        let height = (content_size.y * ppp).round().clamp(1.0, max_side as f32) as u32;
+        let rotation = normalize_degrees(rotation_deg);
+        let rotation_bits = rotation.to_bits();
+        if let Some(cache) = self.cache.borrow().as_ref() {
+            if cache.width == width
+                && cache.height == height
+                && cache.rotation_bits == rotation_bits
+            {
+                return Some(cache.texture.id());
+            }
+        }
+
+        let image = match self.document.render_rotated_to_fit(width, height, rotation) {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::warn!("failed to render vector source: {error}");
+                return None;
+            }
+        };
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [image.width as usize, image.height as usize],
+            &image.pixels,
+        );
+        let options = TextureOptions {
+            magnification: TextureFilter::Linear,
+            minification: TextureFilter::Linear,
+            wrap_mode: TextureWrapMode::ClampToEdge,
+            mipmap_mode: None,
+        };
+        let mut cache = self.cache.borrow_mut();
+        if let Some(cache) = cache.as_mut() {
+            cache.texture.set(color_image, options);
+            cache.width = width;
+            cache.height = height;
+            cache.rotation_bits = rotation_bits;
+            Some(cache.texture.id())
+        } else {
+            let texture = ctx.load_texture("yuetu.vector.source", color_image, options);
+            let id = texture.id();
+            *cache = Some(VectorTextureCache {
+                width,
+                height,
+                rotation_bits,
+                texture,
+            });
+            Some(id)
+        }
+    }
 }
 
 pub struct SourceImage {
@@ -42,6 +134,7 @@ pub struct SourceImage {
     /// Low-resolution rotated source used for stage 2/3 interaction previews.
     interaction_image: Arc<RgbaImage>,
     pub has_transparency: bool,
+    vector: Option<VectorSource>,
     frames: Vec<Arc<RgbaImage>>,
     delays_ms: Vec<u32>,
     original_palette: Option<Palette>,
@@ -54,12 +147,43 @@ pub struct SourceImage {
 
 impl SourceImage {
     pub fn load(ctx: &egui::Context, path: PathBuf) -> yuetu_core::Result<Self> {
+        if is_svg(&path) {
+            return Self::load_svg(ctx, path);
+        }
         let ImageSequence {
             frames,
             delays_ms,
             original_palette,
         } = load_image_sequence(&path)?;
         let frames: Vec<Arc<RgbaImage>> = frames.into_iter().map(Arc::new).collect();
+        Self::from_sequence(ctx, path, frames, delays_ms, original_palette, None)
+    }
+
+    fn load_svg(ctx: &egui::Context, path: PathBuf) -> yuetu_core::Result<Self> {
+        let document = VectorDocument::load(&path)
+            .map_err(|error| yuetu_core::Error::InvalidImage(error.to_string()))?;
+        let raster = document
+            .render_to_long_side(VECTOR_RASTER_LONG_SIDE)
+            .map_err(|error| yuetu_core::Error::InvalidImage(error.to_string()))?;
+        let frames = vec![Arc::new(raster)];
+        Self::from_sequence(
+            ctx,
+            path,
+            frames,
+            vec![0],
+            None,
+            Some(VectorSource::new(document)),
+        )
+    }
+
+    fn from_sequence(
+        ctx: &egui::Context,
+        path: PathBuf,
+        frames: Vec<Arc<RgbaImage>>,
+        delays_ms: Vec<u32>,
+        original_palette: Option<Palette>,
+        vector: Option<VectorSource>,
+    ) -> yuetu_core::Result<Self> {
         let image = frames[0].clone();
         let (display_image, display_size) = prepare_display(ctx, &image, 0.0)?;
         let interaction_image = prepare_interaction_from_display(&display_image)?;
@@ -82,6 +206,7 @@ impl SourceImage {
             display_size,
             interaction_image,
             has_transparency,
+            vector,
             frames,
             delays_ms,
             original_palette,
@@ -93,6 +218,14 @@ impl SourceImage {
             texture,
             texture_dirty: false,
         })
+    }
+
+    pub fn vector(&self) -> Option<&VectorSource> {
+        self.vector.as_ref()
+    }
+
+    pub fn rotation_deg(&self) -> f32 {
+        self.rotation_deg
     }
 
     pub fn frame_count(&self) -> usize {
@@ -278,6 +411,12 @@ impl SourceImage {
             self.rotation_deg
         )
     }
+}
+
+fn is_svg(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
 }
 
 fn prepare_display(
@@ -763,6 +902,7 @@ mod tests {
             display_size,
             interaction_image,
             has_transparency: false,
+            vector: None,
             frames,
             delays_ms: vec![100, 100],
             original_palette: None,
@@ -785,6 +925,24 @@ mod tests {
         assert!(source.texture_dirty);
         source.ensure_display_texture(&ctx).unwrap();
         assert!(!source.texture_dirty);
+    }
+
+    #[test]
+    fn svg_loads_as_a_vector_source_and_builds_a_conversion_raster() {
+        let ctx = egui::Context::default();
+        let path =
+            std::env::temp_dir().join(format!("yuetu-vector-source-{}.svg", std::process::id()));
+        std::fs::write(
+            &path,
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="#00ff00"/></svg>"##,
+        )
+        .unwrap();
+        let source = SourceImage::load(&ctx, path.clone()).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert!(source.vector().is_some());
+        assert!(source.frame_count() == 1);
+        assert_eq!(source.display_size, (2048, 1024));
+        assert_eq!(source.image.pixel(100, 100).map(|color| color.g), Some(255));
     }
 
     #[test]

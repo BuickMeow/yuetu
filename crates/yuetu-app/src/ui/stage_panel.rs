@@ -36,15 +36,29 @@ pub fn show(
 
     match stage {
         PipelineStage::Source => {
-            let hovered = stage_image::show(
-                ui,
-                view,
-                source.texture.id(),
-                source.display_size,
-                source.display_size,
-                source.has_transparency,
-                checker_texture,
-            );
+            let hovered = if let Some(vector) = source.vector() {
+                let ctx = ui.ctx().clone();
+                let rotation = source.rotation_deg();
+                stage_image::show_with_texture(
+                    ui,
+                    view,
+                    source.display_size,
+                    source.display_size,
+                    true,
+                    checker_texture,
+                    |content| vector.texture(&ctx, content.size(), rotation),
+                )
+            } else {
+                stage_image::show(
+                    ui,
+                    view,
+                    source.texture.id(),
+                    source.display_size,
+                    source.display_size,
+                    source.has_transparency,
+                    checker_texture,
+                )
+            };
             *hover = hovered.map(|pixel| StageHover::Source {
                 pos: (pixel.x, pixel.y),
                 color: source.display_pixel(pixel.x, pixel.y),

@@ -21,6 +21,28 @@ pub fn show(
     checkerboard: bool,
     checker_texture: egui::TextureId,
 ) -> Option<RasterHover> {
+    show_with_texture(
+        ui,
+        view,
+        display_size,
+        grid_size,
+        checkerboard,
+        checker_texture,
+        |_| Some(texture),
+    )
+}
+
+/// Raster stage view whose texture can be generated for the current content
+/// size. Used by vector sources, which re-render at the viewport density.
+pub fn show_with_texture(
+    ui: &mut Ui,
+    view: &mut View2D,
+    display_size: (u32, u32),
+    grid_size: (u32, u32),
+    checkerboard: bool,
+    checker_texture: egui::TextureId,
+    texture: impl FnOnce(Rect) -> Option<egui::TextureId>,
+) -> Option<RasterHover> {
     let size = egui::vec2(display_size.0.max(1) as f32, display_size.1.max(1) as f32);
     let interaction = view.interact(ui, size, CursorIcon::Crosshair);
     let painter = ui.painter_at(interaction.viewport);
@@ -35,12 +57,14 @@ pub fn show(
         );
     }
 
-    painter.image(
-        texture,
-        interaction.content_rect,
-        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
+    if let Some(texture) = texture(interaction.content_rect) {
+        painter.image(
+            texture,
+            interaction.content_rect,
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
 
     let hovered = interaction.hover_uv().map(|uv| RasterHover {
         x: ((uv.x * grid_size.0 as f32).floor() as u32).min(grid_size.0.saturating_sub(1)),
