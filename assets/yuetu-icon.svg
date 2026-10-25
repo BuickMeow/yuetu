@@ -1,36 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
   <title id="title">月兔</title>
-  <desc id="desc">一只侧面坐着的兔子，单色镂空图标。</desc>
+  <desc id="desc">一只侧面坐着的兔子，由圆、圆的交集与镂空构成的单色几何图标。</desc>
 
   <defs>
-    <mask id="rabbit-holes" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
-      <rect width="1024" height="1024" fill="#fff"/>
-      <circle cx="375" cy="459" r="17" fill="#000"/>
-      <circle cx="254" cy="518" r="11" fill="#000"/>
-      <ellipse cx="343" cy="254" rx="20" ry="90" transform="rotate(-11 343 254)" fill="#000"/>
-      <ellipse cx="556" cy="221" rx="20" ry="92" transform="rotate(13 556 221)" fill="#000"/>
+    <!-- 耳朵：两个大圆的交集形成长而尖的耳形 -->
+    <clipPath id="ear-left"><circle cx="499.67" cy="211.24" r="241.92"/></clipPath>
+    <clipPath id="ear-right"><circle cx="708.05" cy="268.88" r="262.04"/></clipPath>
+
+    <!-- 内耳：同样以圆的交集挖空 -->
+    <clipPath id="inner-ear-left"><circle cx="589.84" cy="193.71" r="286.78"/></clipPath>
+    <clipPath id="inner-ear-right"><circle cx="830.80" cy="297.22" r="339.03"/></clipPath>
+
+    <mask id="rabbit-holes" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <circle cx="512" cy="512" r="740" fill="#fff"/>
+      <circle cx="351" cy="459" r="17" fill="#000"/>
+      <circle cx="230" cy="518" r="11" fill="#000"/>
+      <g clip-path="url(#inner-ear-left)"><circle cx="62.16" cy="296.29" r="286.78" fill="#000"/></g>
+      <g clip-path="url(#inner-ear-right)"><circle cx="205.20" cy="152.78" r="339.03" fill="#000"/></g>
     </mask>
   </defs>
 
   <g fill="#5EEAD4" mask="url(#rabbit-holes)">
-    <!-- ears -->
-    <ellipse cx="350" cy="245" rx="63" ry="172" transform="rotate(-11 350 245)"/>
-    <ellipse cx="542" cy="215" rx="64" ry="185" transform="rotate(13 542 215)"/>
+    <g clip-path="url(#ear-left)"><circle cx="152.33" cy="278.76" r="241.92"/></g>
+    <g clip-path="url(#ear-right)"><circle cx="327.95" cy="181.12" r="262.04"/></g>
 
-    <!-- head -->
-    <circle cx="430" cy="470" r="135"/>
-    <circle cx="305" cy="505" r="66"/>
+    <circle cx="406" cy="470" r="135"/>
+    <circle cx="281" cy="505" r="66"/>
 
-    <!-- body -->
-    <circle cx="430" cy="590" r="112"/>
-    <circle cx="500" cy="690" r="145"/>
-    <circle cx="590" cy="775" r="168"/>
-    <circle cx="485" cy="810" r="110"/>
+    <circle cx="406" cy="590" r="112"/>
+    <circle cx="476" cy="690" r="145"/>
+    <circle cx="566" cy="775" r="168"/>
+    <circle cx="461" cy="810" r="110"/>
 
-    <!-- tail, hind foot and front paw -->
-    <circle cx="792" cy="722" r="48"/>
-    <ellipse cx="440" cy="902" rx="195" ry="60" transform="rotate(-3 440 902)"/>
-    <ellipse cx="365" cy="760" rx="52" ry="110"/>
-    <circle cx="325" cy="850" r="45"/>
+    <circle cx="768" cy="722" r="48"/>
+    <circle cx="360" cy="900" r="70"/>
   </g>
 </svg>
