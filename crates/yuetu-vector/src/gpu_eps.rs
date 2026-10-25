@@ -17,43 +17,37 @@ use crate::ViewTransform;
 
 pub(crate) fn build(
     page: &stet::PsDisplayList,
+    page_width: f64,
+    page_height: f64,
     width: u32,
     height: u32,
     transform: ViewTransform,
 ) -> Option<Scene> {
-    if width == 0 || height == 0 || width > u32::from(u16::MAX) || height > u32::from(u16::MAX) {
-        return None;
-    }
-    // stet's region renderer only handles axis-aligned views. Keep the same
-    // restriction for the GPU path; rotated EPS falls back to the full-page
-    // raster instead of showing white corners outside the page.
-    if transform.b.abs() > 1e-4
-        || transform.c.abs() > 1e-4
-        || transform.a <= 0.0
-        || transform.d <= 0.0
+    if page_width <= 0.0
+        || page_height <= 0.0
+        || width == 0
+        || height == 0
+        || width > u32::from(u16::MAX)
+        || height > u32::from(u16::MAX)
     {
         return None;
     }
 
     let view = to_affine(transform);
+    let page_path = Rect::new(0.0, 0.0, page_width, page_height).to_path(0.1);
     let mut scene = Scene::new(width as u16, height as u16);
-    // PostScript's paper is opaque white. The source-stage texture covers
-    // exactly the page, so this also avoids a transparent/checkerboard edge.
-    scene.set_transform(Affine::IDENTITY);
+    // Paint white only inside the page polygon. Filling the whole output
+    // rectangle would leave white corners around a rotated page; those
+    // corners are outside the page, not a floating-point artifact.
+    scene.set_transform(view);
     scene.set_paint(Color::WHITE);
-    scene.fill_rect(&Rect::new(
-        0.0,
-        0.0,
-        f64::from(width as u16),
-        f64::from(height as u16),
-    ));
-    let page_clip =
-        Rect::new(0.0, 0.0, f64::from(width as u16), f64::from(height as u16)).to_path(0.1);
-    scene.push_clip_path(&page_clip);
+    scene.fill_path(&page_path);
+    scene.push_clip_path(&page_path);
 
     let mut builder = EpsBuilder {
         scene,
         view,
+        page_path,
         unsupported: false,
         clip_depth: 0,
     };
@@ -69,6 +63,7 @@ pub(crate) fn build(
 struct EpsBuilder {
     scene: Scene,
     view: Affine,
+    page_path: BezPath,
     unsupported: bool,
     clip_depth: usize,
 }
@@ -155,14 +150,9 @@ impl EpsBuilder {
                 self.clip_depth = 0;
             }
             DisplayElement::ErasePage => {
-                self.scene.set_transform(Affine::IDENTITY);
+                self.scene.set_transform(self.view);
                 self.scene.set_paint(Color::WHITE);
-                self.scene.fill_rect(&Rect::new(
-                    0.0,
-                    0.0,
-                    f64::from(self.scene.width()),
-                    f64::from(self.scene.height()),
-                ));
+                self.scene.fill_path(&self.page_path);
             }
             DisplayElement::Group { elements, params } => {
                 if params.blend_mode != 0 || params.knockout {

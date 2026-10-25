@@ -248,7 +248,14 @@ impl VectorDocument {
             }
             Backend::Eps(eps) => {
                 let page = eps.pages.get(page)?;
-                gpu_eps::build(&page.display_list, width, height, transform)
+                gpu_eps::build(
+                    &page.display_list,
+                    f64::from(page.width),
+                    f64::from(page.height),
+                    width,
+                    height,
+                    transform,
+                )
             }
         }
     }
@@ -828,6 +835,20 @@ mod tests {
             },
         );
         assert!(scene.is_some());
+        let rotated = document.build_gpu_scene(
+            0,
+            800,
+            600,
+            ViewTransform {
+                a: 1.732,
+                b: 1.0,
+                c: -1.732,
+                d: 1.0,
+                e: 300.0,
+                f: 20.0,
+            },
+        );
+        assert!(rotated.is_some());
     }
 
     #[test]
