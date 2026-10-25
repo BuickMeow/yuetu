@@ -1,15 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
   <title id="title">月兔</title>
-  <desc id="desc">一只侧面坐着的兔子，由圆、圆的交集与镂空构成的单色几何图标。</desc>
+  <desc id="desc">一只侧面坐着的兔子，前腿与前脚掌在胸前分开，后腿与后脚掌在后侧，由圆、圆的交集和镂空构成。</desc>
 
   <defs>
-    <!-- 耳朵：两个大圆的交集形成长而尖的耳形 -->
+    <!-- 耳朵：两个大圆的交集形成长耳 -->
     <clipPath id="ear-left"><circle cx="499.67" cy="211.24" r="241.92"/></clipPath>
     <clipPath id="ear-right"><circle cx="708.05" cy="268.88" r="262.04"/></clipPath>
 
-    <!-- 内耳：同样以圆的交集挖空 -->
+    <!-- 内耳：圆的交集镂空 -->
     <clipPath id="inner-ear-left"><circle cx="589.84" cy="193.71" r="286.78"/></clipPath>
     <clipPath id="inner-ear-right"><circle cx="830.80" cy="297.22" r="339.03"/></clipPath>
+
+    <!-- 前腿：两圆交集形成的窄长肢体 -->
+    <clipPath id="foreleg"><circle cx="434" cy="795" r="141.5"/></clipPath>
 
     <mask id="rabbit-holes" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
       <circle cx="512" cy="512" r="740" fill="#fff"/>
@@ -22,13 +25,21 @@
     <g clip-path="url(#ear-left)"><circle cx="152.33" cy="278.76" r="241.92"/></g>
     <g clip-path="url(#ear-right)"><circle cx="327.95" cy="181.12" r="262.04"/></g>
 
+    <!-- 头与口鼻 -->
     <circle cx="406" cy="470" r="135"/>
     <circle cx="281" cy="505" r="66"/>
 
-    <circle cx="445" cy="590" r="135"/>
-    <circle cx="565" cy="740" r="195"/>
+    <!-- 臀部：后腿的主体 -->
+    <circle cx="560" cy="710" r="200"/>
 
-    <circle cx="790" cy="710" r="45"/>
-    <circle cx="390" cy="895" r="68"/>
+    <!-- 前腿、前脚掌 -->
+    <g clip-path="url(#foreleg)"><circle cx="256" cy="795" r="141.5"/></g>
+    <circle cx="325" cy="915" r="45"/>
+
+    <!-- 后脚掌：位于前脚掌后方 -->
+    <circle cx="545" cy="885" r="75"/>
+    <circle cx="455" cy="910" r="50"/>
+
+    <circle cx="780" cy="685" r="45"/>
   </g>
 </svg>
