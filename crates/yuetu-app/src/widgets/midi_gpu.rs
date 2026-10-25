@@ -105,16 +105,23 @@ impl MidiGpuCallback {
         scale_y: f32,
         horizontal: bool,
         target_format: wgpu::TextureFormat,
+        pixels_per_point: f32,
     ) -> Self {
+        // Keep the shader in physical pixels so note edges can be snapped to
+        // the real framebuffer grid, independent of the display scale.
+        let dpr = pixels_per_point.max(0.1);
         Self {
             data,
             uniform: MidiUniform {
-                viewport_min: [viewport.min.x, viewport.min.y],
-                viewport_size: [viewport.width().max(1.0), viewport.height().max(1.0)],
-                content_left: content.left(),
-                content_bottom: content.bottom(),
-                scale_x,
-                scale_y,
+                viewport_min: [viewport.min.x * dpr, viewport.min.y * dpr],
+                viewport_size: [
+                    viewport.width().max(1.0) * dpr,
+                    viewport.height().max(1.0) * dpr,
+                ],
+                content_left: content.left() * dpr,
+                content_bottom: content.bottom() * dpr,
+                scale_x: scale_x * dpr,
+                scale_y: scale_y * dpr,
                 horizontal: if horizontal { 1.0 } else { 0.0 },
                 _pad: [0.0; 3],
             },

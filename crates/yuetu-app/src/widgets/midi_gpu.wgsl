@@ -25,6 +25,17 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
 }
 
+// All uniform rectangles are in physical pixels. Snapping both edges to the
+// framebuffer grid removes the 0/1/2 px seam caused by fractional logical
+// offsets. The gap is one device pixel, and notes thinner than two pixels keep
+// their last pixel instead of disappearing.
+const NOTE_GAP_PX: f32 = 1.0;
+const MIN_NOTE_PX: f32 = 1.0;
+
+fn snap_edge(value: f32) -> f32 {
+    return floor(value + 0.5);
+}
+
 fn gamma_to_linear(srgb: vec3<f32>) -> vec3<f32> {
     let cutoff = srgb < vec3<f32>(0.04045);
     let lower = srgb / vec3<f32>(12.92);
@@ -50,15 +61,29 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, instance: Instance) -> Vert
     var bottom: f32;
 
     if (u.horizontal > 0.5) {
-        left = u.content_left + instance.start * u.scale_x + 0.2;
-        right = max(u.content_left + instance.end * u.scale_x - 0.2, left + 0.5);
-        bottom = u.content_bottom - instance.column * u.scale_y - 0.3;
-        top = min(u.content_bottom - (instance.column + 1.0) * u.scale_y + 0.3, bottom - 0.5);
+        left = snap_edge(u.content_left + instance.start * u.scale_x);
+        right = snap_edge(u.content_left + instance.end * u.scale_x);
+        bottom = snap_edge(u.content_bottom - instance.column * u.scale_y);
+        top = snap_edge(u.content_bottom - (instance.column + 1.0) * u.scale_y);
     } else {
-        left = u.content_left + instance.column * u.scale_x + 0.3;
-        right = max(u.content_left + (instance.column + 1.0) * u.scale_x - 0.3, left + 0.5);
-        top = u.content_bottom - instance.end * u.scale_y + 0.2;
-        bottom = max(u.content_bottom - instance.start * u.scale_y - 0.2, top + 0.5);
+        left = snap_edge(u.content_left + instance.column * u.scale_x);
+        right = snap_edge(u.content_left + (instance.column + 1.0) * u.scale_x);
+        top = snap_edge(u.content_bottom - instance.end * u.scale_y);
+        bottom = snap_edge(u.content_bottom - instance.start * u.scale_y);
+    }
+
+    // Snapping can collapse a subpixel cell; keep at least one device pixel.
+    right = max(right, left + MIN_NOTE_PX);
+    bottom = max(bottom, top + MIN_NOTE_PX);
+
+    // Reserve the separator on the max side of each rectangle. Adjacent notes
+    // therefore always leave the same one-device-pixel line. If the cell is
+    // only one pixel wide, the note wins and no gap can physically fit.
+    if (right - left >= MIN_NOTE_PX + NOTE_GAP_PX) {
+        right -= NOTE_GAP_PX;
+    }
+    if (bottom - top >= MIN_NOTE_PX + NOTE_GAP_PX) {
+        bottom -= NOTE_GAP_PX;
     }
 
     let point = vec2<f32>(
