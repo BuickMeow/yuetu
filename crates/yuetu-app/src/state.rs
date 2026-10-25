@@ -30,8 +30,9 @@ const VECTOR_RASTER_LONG_SIDE: u32 = 2048;
 /// Wait for zoom to settle before re-rasterizing the vector source. The old
 /// texture is reused (at the same aspect) while the gesture is active.
 const VECTOR_RENDER_DEBOUNCE: Duration = Duration::from_millis(80);
-/// Full-page texture used only while a new viewport crop is pending.
-const VECTOR_FALLBACK_SIDE: u32 = 2048;
+/// Full-page texture used only while a new viewport crop is pending. Higher
+/// than the normal source preview keeps intermediate zoom frames sharper.
+const VECTOR_FALLBACK_SIDE: u32 = 4096;
 
 struct Thumbnail {
     texture: TextureHandle,
