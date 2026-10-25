@@ -7,7 +7,7 @@ cargo run -p yuetu-app -- testdata/scrub30.gif
 cargo run -p yuetu-app -- testdata/grid800.png
 ```
 
-| 文件 | 尺寸 | 帧数 | 用途 |
+| 文件 | 尺寸 | 帧/页数 | 用途 |
 |---|---:|---:|---|
 | `grid800.png` | 800×800 | 1 | 原图长度/正方形像素、非正方形预览、旋转、键位映射 |
 | `sparse800.png` | 800×800 | 1 | 透明背景、静音区域、稀疏音符、MIDI 小节线 |
@@ -16,6 +16,13 @@ cargo run -p yuetu-app -- testdata/grid800.png
 | `frames300.gif` | 160×100 | 300 | 长动画时间轴、选帧滚动 |
 | `shared-palette.gif` | 300×200 | 2 | 多帧共享调色板 |
 | `scrub30.gif` | 800×800 | 30 | 拖动扫帧、横向时间、固定高度、预览比例 |
+| `vector.svg` | 800×600 | 1 | SVG 读取、渐变、视口重绘 |
+| `vector.pdf` | 400×300 | 2 | PDF 读取、分页、文字和矢量图形 |
+| `vector.ai` | 400×300 | 2 | PDF 兼容 AI |
+| `vector.eps` | 400×300 | 1 | EPS 读取与栅格化 |
+| `vector-eps.ai` | 400×300 | 1 | EPS/PostScript 兼容 AI |
+| `vector-red.svg` | 100×100 | 1 | 矢量渲染单元测试 |
+| `vector-ratio.svg` | 100×50 | 1 | 矢量比例/旋转单元测试 |
 
 解码回归测试：
 
