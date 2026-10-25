@@ -660,6 +660,29 @@ mod tests {
     }
 
     #[test]
+    fn pdf_view_render_uses_a_viewport_offset() {
+        let document = fixture("vector.pdf");
+        let image = document
+            .render_page_view(
+                0,
+                1000,
+                800,
+                ViewTransform {
+                    a: 1.2275,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 1.23,
+                    e: 300.0,
+                    f: 200.0,
+                },
+            )
+            .unwrap();
+        let pixel = image.pixel(459, 396).unwrap();
+        assert!(pixel.r > 150, "{pixel:?}");
+        assert!(pixel.a > 200, "{pixel:?}");
+    }
+
+    #[test]
     fn eps_view_render_renders_an_axis_aligned_crop() {
         let document = fixture("vector.eps");
         let image = document

@@ -256,6 +256,7 @@ impl VectorSource {
             content,
             viewport,
             rotation,
+            ppp,
             out_scale_x,
             out_scale_y,
         );
@@ -684,6 +685,7 @@ fn vector_view_transform(
     content: egui::Rect,
     viewport: egui::Rect,
     rotation: f32,
+    pixels_per_point: f32,
     out_scale_x: f32,
     out_scale_y: f32,
 ) -> yuetu_vector::ViewTransform {
@@ -692,12 +694,12 @@ fn vector_view_transform(
     let (sin, cos) = radians.sin_cos();
     let rotated_w = page_w * cos.abs() + page_h * sin.abs();
     let rotated_h = page_w * sin.abs() + page_h * cos.abs();
-    let sx = content.width() / rotated_w.max(1e-6) * out_scale_x;
-    let sy = content.height() / rotated_h.max(1e-6) * out_scale_y;
+    let sx = content.width() / rotated_w.max(1e-6) * pixels_per_point * out_scale_x;
+    let sy = content.height() / rotated_h.max(1e-6) * pixels_per_point * out_scale_y;
     let ex = rotated_w * 0.5 - cos * page_w * 0.5 + sin * page_h * 0.5;
     let ey = rotated_h * 0.5 - sin * page_w * 0.5 - cos * page_h * 0.5;
-    let tx = (content.left() - viewport.left()) * out_scale_x;
-    let ty = (content.top() - viewport.top()) * out_scale_y;
+    let tx = (content.left() - viewport.left()) * pixels_per_point * out_scale_x;
+    let ty = (content.top() - viewport.top()) * pixels_per_point * out_scale_y;
     yuetu_vector::ViewTransform {
         a: sx * cos,
         b: sy * sin,
@@ -1268,17 +1270,57 @@ mod tests {
     }
 
     #[test]
+    fn vector_view_texture_places_the_page_at_the_content_rect() {
+        let document = yuetu_vector::VectorDocument::load(&PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testdata/vector.pdf"
+        )))
+        .unwrap();
+        let content = egui::Rect::from_min_max(egui::pos2(300.0, 200.0), egui::pos2(791.0, 569.0));
+        let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 800.0));
+        let transform = vector_view_transform(
+            document.page_size(0).unwrap(),
+            content,
+            viewport,
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        let image = document.render_page_view(0, 1000, 800, transform).unwrap();
+        // The first PDF page's red circle is centered at (130, 160); the
+        // content mapping says that point belongs near (459, 396).
+        let pixel = image.pixel(459, 396).unwrap();
+        assert!(pixel.r > 150, "{pixel:?}");
+        assert!(pixel.a > 200, "{pixel:?}");
+        // The checkerboard area outside the page remains transparent.
+        assert_eq!(image.pixel(0, 0).unwrap().a, 0);
+    }
+
+    #[test]
     fn vector_view_transform_keeps_the_page_center_centered() {
         let content = egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(900.0, 650.0));
         let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 800.0));
         for rotation in [0.0, 37.0, 90.0, -45.0] {
             let transform =
-                vector_view_transform((400.0, 300.0), content, viewport, rotation, 1.0, 1.0);
+                vector_view_transform((400.0, 300.0), content, viewport, rotation, 1.0, 1.0, 1.0);
             let x = transform.a * 200.0 + transform.c * 150.0 + transform.e;
             let y = transform.b * 200.0 + transform.d * 150.0 + transform.f;
             assert!((x - content.center().x).abs() < 0.01, "{rotation}");
             assert!((y - content.center().y).abs() < 0.01, "{rotation}");
         }
+    }
+
+    #[test]
+    fn vector_view_transform_includes_device_pixel_scale() {
+        let content = egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(900.0, 650.0));
+        let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 800.0));
+        let transform =
+            vector_view_transform((400.0, 300.0), content, viewport, 0.0, 2.0, 1.0, 1.0);
+        assert!((transform.a - 4.0).abs() < 0.01);
+        assert!((transform.d - 4.0).abs() < 0.01);
+        assert!((transform.e - 200.0).abs() < 0.01);
+        assert!((transform.f - 100.0).abs() < 0.01);
     }
 
     #[test]
