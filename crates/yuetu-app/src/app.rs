@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Key, Modifiers};
@@ -49,6 +50,7 @@ pub struct YuetuApp {
     settings_scrub_pending: bool,
     checker_texture: egui::TextureHandle,
     gpu_target_format: eframe::wgpu::TextureFormat,
+    gpu_render_state: Option<Arc<eframe::egui_wgpu::RenderState>>,
     source_view: View2D,
     key_view: View2D,
     palette_view: View2D,
@@ -79,6 +81,10 @@ impl YuetuApp {
             .as_ref()
             .map(|state| state.target_format)
             .unwrap_or(eframe::wgpu::TextureFormat::Bgra8UnormSrgb);
+        let gpu_render_state = cc
+            .wgpu_render_state
+            .as_ref()
+            .map(|state| Arc::new(state.clone()));
 
         let mut app = Self {
             source: None,
@@ -98,6 +104,7 @@ impl YuetuApp {
             settings_scrub_pending: false,
             checker_texture,
             gpu_target_format,
+            gpu_render_state,
             source_view: View2D::default(),
             key_view: View2D::default(),
             palette_view: View2D::default(),
@@ -145,7 +152,7 @@ impl YuetuApp {
         self.job_started = None;
         self.auto_convert_at = None;
 
-        match SourceImage::load(ctx, path.clone()) {
+        match SourceImage::load_with_gpu(ctx, path.clone(), self.gpu_render_state.clone()) {
             Ok(source) => {
                 self.source_generation = self.source_generation.wrapping_add(1);
                 self.shared_palette_cache = None;

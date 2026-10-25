@@ -12,10 +12,10 @@ resvg = "0.49"
 stet = { version = "0.8", default-features = false, features = ["render"] }
 thiserror.workspace = true
 usvg = "0.49"
+vello_common = "0.3"
+vello_gpu = "0.3"
 yuetu-core = { workspace = true }
 
 [dev-dependencies]
-vello_common = "0.3"
-vello_gpu = "0.3"
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
 pollster = "0.4"

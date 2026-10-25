@@ -5078,6 +5078,7 @@ dependencies = [
  "rfd",
  "tracing",
  "tracing-subscriber",
+ "vello_gpu",
  "yuetu-core",
  "yuetu-vector",
 ]

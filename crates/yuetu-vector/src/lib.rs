@@ -10,6 +10,8 @@ use resvg::tiny_skia;
 use thiserror::Error;
 use yuetu_core::{ResizeAlgorithm, RgbaImage, resize::resize, rotate::rotate_image};
 
+mod gpu;
+
 #[derive(Debug, Error)]
 pub enum VectorError {
     #[error("failed to read vector file: {0}")]
@@ -216,6 +218,25 @@ impl VectorDocument {
             }
             Backend::Pdf(pdf) => render_pdf_page_view(pdf, page, width, height, transform),
             Backend::Eps(eps) => render_eps_view(eps, page, width, height, transform),
+        }
+    }
+
+    /// Build a Vello GPU scene using a page-user-unit -> output-pixel
+    /// transform. Only SVG paths that can be represented faithfully are
+    /// accepted; `None` means the caller should keep using the CPU renderer.
+    pub fn build_gpu_scene(
+        &self,
+        page: usize,
+        width: u32,
+        height: u32,
+        transform: ViewTransform,
+    ) -> Option<vello_gpu::Scene> {
+        if page != 0 {
+            return None;
+        }
+        match &self.backend {
+            Backend::Svg(tree) => gpu::build(tree, width, height, transform),
+            Backend::Pdf(_) | Backend::Eps(_) => None,
         }
     }
 
@@ -704,6 +725,44 @@ mod tests {
         let pixel = image.pixel(65, 80).unwrap();
         assert!(pixel.r > 150, "{pixel:?}");
         assert!(pixel.a > 200, "{pixel:?}");
+    }
+
+    #[test]
+    fn svg_builds_a_gpu_scene_for_solid_paths() {
+        let document = fixture("vector-red.svg");
+        let scene = document.build_gpu_scene(
+            0,
+            64,
+            64,
+            ViewTransform {
+                a: 0.64,
+                b: 0.0,
+                c: 0.0,
+                d: 0.64,
+                e: 0.0,
+                f: 0.0,
+            },
+        );
+        assert!(scene.is_some());
+    }
+
+    #[test]
+    fn svg_builds_a_gpu_scene_for_gradients() {
+        let document = fixture("vector.svg");
+        let scene = document.build_gpu_scene(
+            0,
+            800,
+            600,
+            ViewTransform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 0.0,
+                f: 0.0,
+            },
+        );
+        assert!(scene.is_some());
     }
 
     #[test]

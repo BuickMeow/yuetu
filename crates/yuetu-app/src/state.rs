@@ -1,7 +1,7 @@
 //! Application state that outlives a single frame.
 
 use egui::{TextureFilter, TextureHandle, TextureOptions, TextureWrapMode};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,6 +14,7 @@ use yuetu_core::{
 use yuetu_vector::VectorDocument;
 
 use crate::widgets::midi_gpu::MidiGpuData;
+use crate::widgets::vector_gpu::VectorGpu;
 
 /// Longest side of the texture uploaded to the GPU. The conversion still uses
 /// the full-resolution CPU image; this is display-only.
@@ -83,16 +84,25 @@ pub struct VectorSource {
     cache: RefCell<Option<VectorViewCache>>,
     fallback: RefCell<Option<VectorFallbackCache>>,
     pending: RefCell<Option<(VectorViewKey, Instant)>>,
+    gpu: RefCell<Option<VectorGpu>>,
+    gpu_key: Cell<Option<VectorViewKey>>,
+    gpu_texture: Cell<Option<egui::TextureId>>,
 }
 
 impl VectorSource {
-    fn new(document: VectorDocument) -> Self {
+    fn new(
+        document: VectorDocument,
+        gpu_render_state: Option<Arc<eframe::egui_wgpu::RenderState>>,
+    ) -> Self {
         Self {
             document,
             page: 0,
             cache: RefCell::new(None),
             fallback: RefCell::new(None),
             pending: RefCell::new(None),
+            gpu: RefCell::new(gpu_render_state.map(VectorGpu::new)),
+            gpu_key: Cell::new(None),
+            gpu_texture: Cell::new(None),
         }
     }
 
@@ -114,6 +124,8 @@ impl VectorSource {
             *self.cache.borrow_mut() = None;
             *self.fallback.borrow_mut() = None;
             *self.pending.borrow_mut() = None;
+            self.gpu_key.set(None);
+            self.gpu_texture.set(None);
         }
     }
 
@@ -222,6 +234,45 @@ impl VectorSource {
             ],
             ppp_bits: ppp.to_bits(),
         };
+        if let (Some(gpu_key), Some(texture)) = (self.gpu_key.get(), self.gpu_texture.get()) {
+            if gpu_key == key {
+                *self.pending.borrow_mut() = None;
+                return Some(VectorDraw {
+                    texture,
+                    rect: visible,
+                });
+            }
+        }
+
+        let out_scale_x = width as f32 / (visible.width() * ppp).max(1e-6);
+        let out_scale_y = height as f32 / (visible.height() * ppp).max(1e-6);
+        let transform = vector_view_transform(
+            page_size,
+            content,
+            visible,
+            rotation,
+            ppp,
+            out_scale_x,
+            out_scale_y,
+        );
+        // GPU path rendering is fast enough to run during a zoom or pan. Doing
+        // it before the fallback debounce keeps SVG sources sharp for the whole
+        // gesture instead of showing an upscaled page raster for 80 ms.
+        let gpu_texture = self
+            .gpu
+            .borrow_mut()
+            .as_mut()
+            .and_then(|gpu| gpu.render(&self.document, self.page, width, height, transform));
+        if let Some(texture) = gpu_texture {
+            *self.pending.borrow_mut() = None;
+            self.gpu_key.set(Some(key));
+            self.gpu_texture.set(Some(texture));
+            return Some(VectorDraw {
+                texture,
+                rect: visible,
+            });
+        }
+
         if let Some(cache) = self.cache.borrow().as_ref() {
             if cache.key == key {
                 *self.pending.borrow_mut() = None;
@@ -257,17 +308,6 @@ impl VectorSource {
             }
         }
 
-        let out_scale_x = width as f32 / (visible.width() * ppp).max(1e-6);
-        let out_scale_y = height as f32 / (visible.height() * ppp).max(1e-6);
-        let transform = vector_view_transform(
-            page_size,
-            content,
-            visible,
-            rotation,
-            ppp,
-            out_scale_x,
-            out_scale_y,
-        );
         let image = match self
             .document
             .render_page_view(self.page, width, height, transform)
@@ -332,9 +372,18 @@ pub struct SourceImage {
 }
 
 impl SourceImage {
+    #[cfg(test)]
     pub fn load(ctx: &egui::Context, path: PathBuf) -> yuetu_core::Result<Self> {
+        Self::load_with_gpu(ctx, path, None)
+    }
+
+    pub fn load_with_gpu(
+        ctx: &egui::Context,
+        path: PathBuf,
+        gpu_render_state: Option<Arc<eframe::egui_wgpu::RenderState>>,
+    ) -> yuetu_core::Result<Self> {
         if is_vector(&path) {
-            return Self::load_vector(ctx, path);
+            return Self::load_vector(ctx, path, gpu_render_state);
         }
         let ImageSequence {
             frames,
@@ -345,7 +394,11 @@ impl SourceImage {
         Self::from_sequence(ctx, path, frames, delays_ms, original_palette, None)
     }
 
-    fn load_vector(ctx: &egui::Context, path: PathBuf) -> yuetu_core::Result<Self> {
+    fn load_vector(
+        ctx: &egui::Context,
+        path: PathBuf,
+        gpu_render_state: Option<Arc<eframe::egui_wgpu::RenderState>>,
+    ) -> yuetu_core::Result<Self> {
         let document = VectorDocument::load(&path)
             .map_err(|error| yuetu_core::Error::InvalidImage(error.to_string()))?;
         let raster = document
@@ -358,7 +411,7 @@ impl SourceImage {
             frames,
             vec![0],
             None,
-            Some(VectorSource::new(document)),
+            Some(VectorSource::new(document, gpu_render_state)),
         )
     }
 
