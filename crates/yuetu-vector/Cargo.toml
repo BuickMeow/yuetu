@@ -1,0 +1,13 @@
+[package]
+name = "yuetu-vector"
+description = "Vector document loading and rasterization for Yuetu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+resvg = "0.49"
+thiserror.workspace = true
+usvg = "0.49"
+yuetu-core = { workspace = true }

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/yuetu-core",
+    "crates/yuetu-vector",
     "crates/yuetu-app",
 ]
 
@@ -13,6 +14,7 @@ license = "MIT"
 
 [workspace.dependencies]
 yuetu-core = { path = "crates/yuetu-core" }
+yuetu-vector = { path = "crates/yuetu-vector" }
 
 bytemuck = { version = "1", features = ["derive"] }
 egui = "0.37.0"
