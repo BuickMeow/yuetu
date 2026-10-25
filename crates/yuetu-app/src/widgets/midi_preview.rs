@@ -14,6 +14,7 @@ use yuetu_core::{ConversionResult, MidiOutputConfig, TimeAxis, is_white_key, not
 use crate::state::StageHover;
 use crate::theme;
 use crate::widgets::midi_gpu::{MidiGpuCallback, MidiGpuData};
+use crate::widgets::piano;
 use crate::widgets::view2d::View2D;
 
 pub struct PreviewOutput {
@@ -32,24 +33,16 @@ pub fn show(
         result.source_size.0.max(1) as f32,
         result.source_size.1.max(1) as f32,
     );
-    let interaction = view.interact(ui, display_size, CursorIcon::Crosshair);
+    let horizontal = result.time_axis == TimeAxis::Horizontal;
+    let available = ui.available_rect_before_wrap();
+    let (roll_rect, piano_rect) = split_view(available, horizontal);
+    ui.advance_cursor_after_rect(available);
+    let interaction = view.interact_in_rect(ui, roll_rect, display_size, CursorIcon::Crosshair);
     let painter = ui.painter_at(interaction.viewport);
 
     painter.rect_filled(interaction.viewport, 0.0, theme::view_bg(ui));
 
-    if result.notes.is_empty() {
-        painter.text(
-            interaction.viewport.center(),
-            egui::Align2::CENTER_CENTER,
-            "没有生成音符",
-            FontId::proportional(14.0),
-            theme::muted(ui),
-        );
-        return PreviewOutput { hovered: None };
-    }
-
     let content = interaction.content_rect;
-    let horizontal = result.time_axis == TimeAxis::Horizontal;
     let key_count = result.keymap.width().max(1) as f32;
     let time_rows = result.time_rows.max(1) as f32;
     let (x_units, y_units) = if horizontal {
@@ -60,6 +53,20 @@ pub fn show(
     let scale_x = content.width() / x_units;
     let scale_y = content.height() / y_units;
     let keymap = &result.keymap;
+
+    if result.notes.is_empty() {
+        painter.text(
+            interaction.viewport.center(),
+            egui::Align2::CENTER_CENTER,
+            "没有生成音符",
+            FontId::proportional(14.0),
+            theme::muted(ui),
+        );
+        draw_keyboard(
+            ui, result, content, piano_rect, horizontal, scale_x, scale_y,
+        );
+        return PreviewOutput { hovered: None };
+    }
 
     // ── Pitch lanes ────────────────────────────────────────────────
     for position in 0..keymap.width() {
@@ -96,7 +103,7 @@ pub fn show(
         if key % 12 != 0 {
             continue;
         }
-        let stroke = Stroke::new(1.0, Color32::from_white_alpha(18));
+        let stroke = Stroke::new(1.0, theme::roll_line(ui));
         if horizontal {
             let y = content.bottom() - position as f32 * scale_y;
             if y >= interaction.viewport.top() && y <= interaction.viewport.bottom() {
@@ -169,6 +176,9 @@ pub fn show(
         result.time_rows,
         midi_config,
     );
+    draw_keyboard(
+        ui, result, content, piano_rect, horizontal, scale_x, scale_y,
+    );
 
     // ── Hover ──────────────────────────────────────────────────────
     let mut hovered = None;
@@ -212,6 +222,57 @@ pub fn show(
     }
 
     PreviewOutput { hovered }
+}
+
+fn split_view(available: Rect, horizontal: bool) -> (Rect, Rect) {
+    const MIN_ROLL: f32 = 96.0;
+    if horizontal {
+        if available.width() >= piano::THICKNESS + MIN_ROLL {
+            let split = available.left() + piano::THICKNESS;
+            let keys = Rect::from_min_max(available.min, egui::pos2(split, available.bottom()));
+            let roll = Rect::from_min_max(egui::pos2(split, available.top()), available.max);
+            (roll, keys)
+        } else {
+            (available, Rect::NOTHING)
+        }
+    } else if available.height() >= piano::THICKNESS + MIN_ROLL {
+        let split = available.bottom() - piano::THICKNESS;
+        let roll = Rect::from_min_max(available.min, egui::pos2(available.right(), split));
+        let keys = Rect::from_min_max(egui::pos2(available.left(), split), available.max);
+        (roll, keys)
+    } else {
+        (available, Rect::NOTHING)
+    }
+}
+
+fn draw_keyboard(
+    ui: &Ui,
+    result: &ConversionResult,
+    content: Rect,
+    rect: Rect,
+    horizontal: bool,
+    scale_x: f32,
+    scale_y: f32,
+) {
+    if !rect.is_positive() {
+        return;
+    }
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, theme::view_bg(ui));
+    let (orientation, scale) = if horizontal {
+        (piano::Orientation::Vertical, scale_y)
+    } else {
+        (piano::Orientation::Horizontal, scale_x)
+    };
+    piano::show(
+        ui,
+        &painter,
+        &result.keymap,
+        rect,
+        content,
+        scale,
+        orientation,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -286,6 +286,11 @@ pub fn view_bg(ui: &Ui) -> Color32 {
     }
 }
 
+/// Low-contrast line shared by piano-roll pitch lanes and the keyboard.
+pub fn roll_line(_ui: &Ui) -> Color32 {
+    Color32::from_white_alpha(34)
+}
+
 pub fn lane_white(ui: &Ui) -> Color32 {
     if CUSTOM_THEME {
         BG_LANE_WHITE

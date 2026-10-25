@@ -124,7 +124,34 @@ impl View2D {
         let available = ui.available_size();
         let size = Vec2::new(available.x.max(1.0), available.y.max(1.0));
         let (viewport, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        self.update(ui, viewport, response, content_size, cursor)
+    }
 
+    /// Interact with a caller-provided viewport. Used when the stage reserves a
+    /// strip (such as the piano keyboard) outside the image's aspect box.
+    pub fn interact_in_rect(
+        &mut self,
+        ui: &mut Ui,
+        viewport: Rect,
+        content_size: Vec2,
+        cursor: CursorIcon,
+    ) -> ViewInteraction {
+        let response = ui.interact(
+            viewport,
+            ui.scope_id().with("view2d"),
+            Sense::click_and_drag(),
+        );
+        self.update(ui, viewport, response, content_size, cursor)
+    }
+
+    fn update(
+        &mut self,
+        ui: &mut Ui,
+        viewport: Rect,
+        response: Response,
+        content_size: Vec2,
+        cursor: CursorIcon,
+    ) -> ViewInteraction {
         let content_size = Vec2::new(content_size.x.max(1.0), content_size.y.max(1.0));
         let fit =
             (viewport.width() / content_size.x).min(viewport.height() / content_size.y) * 0.97;
