@@ -19,6 +19,7 @@ pub struct Action {
     pub cancel: bool,
     pub export: bool,
     pub frame: Option<usize>,
+    pub vector_page: Option<usize>,
     pub rotation: Option<f32>,
     pub rotation_dragging: bool,
     /// Conversion setting currently being dragged. The app suspends jobs for
@@ -63,6 +64,7 @@ pub fn show(
 
                 if let Some(source) = source {
                     ui.label(RichText::new(source.name.as_str()).strong());
+                    let pages = source.vector_page_count();
                     if source.frame_count() > 1 {
                         ui.label(format!(
                             "{} × {} px · {} 帧",
@@ -81,6 +83,24 @@ pub fn show(
                             );
                             if response.changed() {
                                 action.frame = Some(frame.saturating_sub(1) as usize);
+                            }
+                        });
+                    } else if pages > 1 {
+                        ui.label(format!(
+                            "{} × {} px · {} 页",
+                            source.display_size.0, source.display_size.1, pages
+                        ));
+                        setting_row(ui, "页", |ui| {
+                            let count = pages as u32;
+                            let mut page = source.vector_page() as u32 + 1;
+                            let response = ui.add(
+                                egui::DragValue::new(&mut page)
+                                    .range(1..=count)
+                                    .speed(1.0)
+                                    .suffix(format!(" / {count}")),
+                            );
+                            if response.changed() {
+                                action.vector_page = Some(page.saturating_sub(1) as usize);
                             }
                         });
                     } else {

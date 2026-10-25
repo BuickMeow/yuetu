@@ -45,6 +45,7 @@ struct VectorTextureCache {
 /// display, re-rendering at the current viewport density.
 pub struct VectorSource {
     document: VectorDocument,
+    page: usize,
     cache: RefCell<Option<VectorTextureCache>>,
 }
 
@@ -52,7 +53,23 @@ impl VectorSource {
     fn new(document: VectorDocument) -> Self {
         Self {
             document,
+            page: 0,
             cache: RefCell::new(None),
+        }
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.document.page_count()
+    }
+
+    pub fn page(&self) -> usize {
+        self.page
+    }
+
+    fn set_page(&mut self, page: usize) {
+        if page < self.document.page_count() {
+            self.page = page;
+            *self.cache.borrow_mut() = None;
         }
     }
 
@@ -82,7 +99,10 @@ impl VectorSource {
             }
         }
 
-        let image = match self.document.render_rotated_to_fit(width, height, rotation) {
+        let image = match self
+            .document
+            .render_page_rotated_to_fit(self.page, width, height, rotation)
+        {
             Ok(image) => image,
             Err(error) => {
                 tracing::warn!("failed to render vector source: {error}");
@@ -147,8 +167,8 @@ pub struct SourceImage {
 
 impl SourceImage {
     pub fn load(ctx: &egui::Context, path: PathBuf) -> yuetu_core::Result<Self> {
-        if is_svg(&path) {
-            return Self::load_svg(ctx, path);
+        if is_vector(&path) {
+            return Self::load_vector(ctx, path);
         }
         let ImageSequence {
             frames,
@@ -159,7 +179,7 @@ impl SourceImage {
         Self::from_sequence(ctx, path, frames, delays_ms, original_palette, None)
     }
 
-    fn load_svg(ctx: &egui::Context, path: PathBuf) -> yuetu_core::Result<Self> {
+    fn load_vector(ctx: &egui::Context, path: PathBuf) -> yuetu_core::Result<Self> {
         let document = VectorDocument::load(&path)
             .map_err(|error| yuetu_core::Error::InvalidImage(error.to_string()))?;
         let raster = document
@@ -226,6 +246,57 @@ impl SourceImage {
 
     pub fn rotation_deg(&self) -> f32 {
         self.rotation_deg
+    }
+
+    pub fn vector_page_count(&self) -> usize {
+        self.vector
+            .as_ref()
+            .map(VectorSource::page_count)
+            .unwrap_or(1)
+    }
+
+    pub fn vector_page(&self) -> usize {
+        self.vector.as_ref().map(VectorSource::page).unwrap_or(0)
+    }
+
+    pub fn select_vector_page(
+        &mut self,
+        ctx: &egui::Context,
+        page: usize,
+        upload_display_texture: bool,
+    ) -> yuetu_core::Result<bool> {
+        let Some(vector) = self.vector.as_mut() else {
+            return Ok(false);
+        };
+        if page >= vector.page_count() || page == vector.page {
+            return Ok(false);
+        }
+        let raster = vector
+            .document
+            .render_page_to_long_side(page, VECTOR_RASTER_LONG_SIDE)
+            .map_err(|error| yuetu_core::Error::InvalidImage(error.to_string()))?;
+        vector.set_page(page);
+        let image = Arc::new(raster);
+        let (display_image, display_size) = prepare_display(ctx, &image, self.rotation_deg)?;
+        let interaction_image = prepare_interaction_from_display(&display_image)?;
+        if upload_display_texture {
+            let has_transparency = image_has_transparency(&display_image);
+            let texture_name = self.texture_name(0);
+            self.texture = upload_texture(ctx, &texture_name, &display_image)?;
+            self.has_transparency = has_transparency;
+            self.texture_dirty = false;
+        } else {
+            self.texture_dirty = true;
+        }
+        self.image = image;
+        self.display_image = display_image;
+        self.display_size = display_size;
+        self.interaction_image = interaction_image;
+        self.frame_index = 0;
+        if let Some(frame) = self.frames.first_mut() {
+            *frame = self.image.clone();
+        }
+        Ok(true)
     }
 
     pub fn frame_count(&self) -> usize {
@@ -413,10 +484,15 @@ impl SourceImage {
     }
 }
 
-fn is_svg(path: &Path) -> bool {
+fn is_vector(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "svg" | "pdf" | "ai" | "eps"
+            )
+        })
 }
 
 fn prepare_display(
@@ -930,19 +1006,30 @@ mod tests {
     #[test]
     fn svg_loads_as_a_vector_source_and_builds_a_conversion_raster() {
         let ctx = egui::Context::default();
-        let path =
-            std::env::temp_dir().join(format!("yuetu-vector-source-{}.svg", std::process::id()));
-        std::fs::write(
-            &path,
-            br##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect width="100" height="50" fill="#00ff00"/></svg>"##,
-        )
-        .unwrap();
-        let source = SourceImage::load(&ctx, path.clone()).unwrap();
-        let _ = std::fs::remove_file(path);
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testdata/vector.svg"
+        ));
+        let source = SourceImage::load(&ctx, path).unwrap();
         assert!(source.vector().is_some());
-        assert!(source.frame_count() == 1);
-        assert_eq!(source.display_size, (2048, 1024));
-        assert_eq!(source.image.pixel(100, 100).map(|color| color.g), Some(255));
+        assert_eq!(source.frame_count(), 1);
+        assert_eq!(source.vector_page_count(), 1);
+        assert_eq!(source.display_size, (2048, 1536));
+        assert_eq!(source.image.pixel(100, 100).map(|color| color.a), Some(255));
+    }
+
+    #[test]
+    fn pdf_pages_can_be_selected() {
+        let ctx = egui::Context::default();
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testdata/vector.pdf"
+        ));
+        let mut source = SourceImage::load(&ctx, path).unwrap();
+        assert_eq!(source.vector_page_count(), 2);
+        assert!(source.select_vector_page(&ctx, 1, false).unwrap());
+        assert_eq!(source.vector_page(), 1);
+        assert_eq!(source.display_size, (2048, 1536));
     }
 
     #[test]

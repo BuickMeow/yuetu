@@ -891,6 +891,26 @@ impl eframe::App for YuetuApp {
         if let Some(frame) = controls_action.frame {
             acted |= self.select_source_frame(&ctx, frame, false);
         }
+        if let Some(page) = controls_action.vector_page {
+            let upload_display = self.stage == PipelineStage::Source;
+            let changed = self.source.as_mut().is_some_and(|source| {
+                match source.select_vector_page(&ctx, page, upload_display) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        self.status = StatusMessage::error(format!("切换页面失败：{error}"));
+                        false
+                    }
+                }
+            });
+            if changed {
+                self.source_revision = self.source_revision.wrapping_add(1);
+                self.stage_hover = None;
+                self.status = StatusMessage::info("正在更新预览…");
+                self.source_view.reset_fit();
+                self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
+                acted = true;
+            }
+        }
         if let Some(frame) = frame_strip_output.frame {
             acted |= self.select_source_frame(&ctx, frame, frame_strip_output.scrubbing);
         }
