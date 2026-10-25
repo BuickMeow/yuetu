@@ -127,23 +127,6 @@ impl View2D {
         self.update(ui, viewport, response, content_size, cursor)
     }
 
-    /// Interact with a caller-provided viewport. Used when the stage reserves a
-    /// strip (such as the piano keyboard) outside the image's aspect box.
-    pub fn interact_in_rect(
-        &mut self,
-        ui: &mut Ui,
-        viewport: Rect,
-        content_size: Vec2,
-        cursor: CursorIcon,
-    ) -> ViewInteraction {
-        let response = ui.interact(
-            viewport,
-            ui.scope_id().with("view2d"),
-            Sense::click_and_drag(),
-        );
-        self.update(ui, viewport, response, content_size, cursor)
-    }
-
     fn update(
         &mut self,
         ui: &mut Ui,
@@ -469,13 +452,5 @@ impl ViewInteraction {
             ((pointer.y - self.content_rect.top()) / self.content_rect.height())
                 .clamp(0.0, 0.999_999),
         ))
-    }
-
-    pub fn hover_pos_in_content(&self) -> Option<Pos2> {
-        if !self.response.hovered() {
-            return None;
-        }
-        let pointer = self.response.hover_pos()?;
-        self.content_rect.contains(pointer).then_some(pointer)
     }
 }

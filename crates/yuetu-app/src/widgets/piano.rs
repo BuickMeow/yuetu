@@ -2,19 +2,19 @@
 //!
 //! The keyboard is deliberately drawn with the same low-contrast line color as
 //! the roll's pitch lanes: white-key separators are lines, and black keys are
-//! short outlined slots. This keeps the keyboard readable without introducing
-//! a second palette next to the notes.
+//! short solid slots. This keeps the keyboard readable without introducing a
+//! second palette next to the notes.
 
-use egui::{Align2, Color32, FontId, Painter, Rect, Stroke, StrokeKind, Ui};
+use egui::{Align2, Color32, FontId, Painter, Rect, Stroke, Ui};
 use yuetu_core::{KeyMap, is_white_key, note_name};
 
 use crate::theme;
 
-/// Thickness of the keyboard strip measured across the key axis.
-pub const THICKNESS: f32 = 46.0;
+/// Keyboard thickness as a fraction of the image's time-axis extent.
+pub const THICKNESS_RATIO: f32 = 0.07;
 
-const BLACK_KEY_SIZE: f32 = 0.62;
-const BLACK_KEY_FILL_ALPHA: u8 = 14;
+/// How far a black key extends across the keyboard strip.
+const BLACK_KEY_DEPTH: f32 = 0.62;
 const LABEL_MIN_LANE: f32 = 10.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +43,10 @@ pub fn show(
         return;
     }
 
-    let line = theme::roll_line(ui);
+    // The roll grid line is translucent. Composite it once over the keyboard
+    // background so the black-key fill and every stroke use the exact same
+    // opaque color instead of stacking alpha at their shared edges.
+    let line = theme::view_bg(ui).blend(theme::roll_line(ui));
     let label = theme::faint(ui);
     // The keyboard lives outside the roll content, so clipping to their
     // intersection would erase it. Clip only the key axis to the content.
@@ -59,7 +62,20 @@ pub fn show(
     };
     let painter = painter.with_clip_rect(clip.intersect(strip));
 
-    draw_edge(&painter, strip, orientation, line);
+    // Solid black keys first. Their full lane width makes both edges coincide
+    // with the white-key separators instead of floating inside a lane.
+    for position in 0..keymap.width() {
+        let Some(key) = keymap.key_at(position) else {
+            continue;
+        };
+        if is_white_key(key) {
+            continue;
+        }
+        let lane = lane_rect(strip, content, key_scale, position, orientation);
+        let black = black_key_rect(strip, lane, orientation);
+        painter.rect_filled(black, 0.0, line);
+        draw_black_tip(&painter, black, orientation, line);
+    }
 
     // White-key separators cover every key lane, including filtered-out
     // columns, so clipped mappings still show the silent gaps.
@@ -92,43 +108,35 @@ pub fn show(
         }
     }
 
-    let black_fill =
-        Color32::from_rgba_unmultiplied(line.r(), line.g(), line.b(), BLACK_KEY_FILL_ALPHA);
     for position in 0..count {
         let Some(key) = keymap.key_at(position) else {
             continue;
         };
-        if is_white_key(key) {
-            if key % 12 == 0 {
-                draw_label(
-                    &painter,
-                    strip,
-                    content,
-                    key_scale,
-                    position,
-                    key,
-                    orientation,
-                    label,
-                );
-            }
-            continue;
+        if key % 12 == 0 {
+            draw_label(
+                &painter,
+                strip,
+                content,
+                key_scale,
+                position,
+                key,
+                orientation,
+                label,
+            );
         }
-
-        let lane = lane_rect(strip, content, key_scale, position, orientation);
-        let black = black_key_rect(strip, lane, orientation);
-        painter.rect_filled(black, 0.0, black_fill);
-        painter.rect_stroke(black, 0.0, Stroke::new(1.0, line), StrokeKind::Inside);
     }
+
+    draw_edge(&painter, strip, orientation, line);
 }
 
-fn draw_edge(painter: &Painter, strip: Rect, orientation: Orientation, line: Color32) {
+fn draw_black_tip(painter: &Painter, black: Rect, orientation: Orientation, line: Color32) {
     let stroke = Stroke::new(1.0, line);
     match orientation {
         Orientation::Horizontal => {
             painter.line_segment(
                 [
-                    egui::pos2(strip.left(), strip.top()),
-                    egui::pos2(strip.right(), strip.top()),
+                    egui::pos2(black.left(), black.bottom()),
+                    egui::pos2(black.right(), black.bottom()),
                 ],
                 stroke,
             );
@@ -136,11 +144,33 @@ fn draw_edge(painter: &Painter, strip: Rect, orientation: Orientation, line: Col
         Orientation::Vertical => {
             painter.line_segment(
                 [
-                    egui::pos2(strip.right(), strip.top()),
-                    egui::pos2(strip.right(), strip.bottom()),
+                    egui::pos2(black.right(), black.top()),
+                    egui::pos2(black.right(), black.bottom()),
                 ],
                 stroke,
             );
+        }
+    }
+}
+
+fn draw_edge(painter: &Painter, strip: Rect, orientation: Orientation, line: Color32) {
+    let stroke = Stroke::new(1.0, line);
+    match orientation {
+        Orientation::Horizontal => {
+            for y in [strip.top(), strip.bottom()] {
+                painter.line_segment(
+                    [egui::pos2(strip.left(), y), egui::pos2(strip.right(), y)],
+                    stroke,
+                );
+            }
+        }
+        Orientation::Vertical => {
+            for x in [strip.left(), strip.right()] {
+                painter.line_segment(
+                    [egui::pos2(x, strip.top()), egui::pos2(x, strip.bottom())],
+                    stroke,
+                );
+            }
         }
     }
 }
@@ -218,19 +248,17 @@ fn lane_rect(
 fn black_key_rect(strip: Rect, lane: Rect, orientation: Orientation) -> Rect {
     match orientation {
         Orientation::Horizontal => {
-            let width = lane.width() * BLACK_KEY_SIZE;
-            let height = strip.height() * BLACK_KEY_SIZE;
+            let depth = strip.height() * BLACK_KEY_DEPTH;
             Rect::from_min_max(
-                egui::pos2(lane.center().x - width * 0.5, strip.top()),
-                egui::pos2(lane.center().x + width * 0.5, strip.top() + height),
+                egui::pos2(lane.left(), strip.top()),
+                egui::pos2(lane.right(), strip.top() + depth),
             )
         }
         Orientation::Vertical => {
-            let width = strip.width() * BLACK_KEY_SIZE;
-            let height = lane.height() * BLACK_KEY_SIZE;
+            let depth = strip.width() * BLACK_KEY_DEPTH;
             Rect::from_min_max(
-                egui::pos2(strip.left(), lane.center().y - height * 0.5),
-                egui::pos2(strip.left() + width, lane.center().y + height * 0.5),
+                egui::pos2(strip.left(), lane.top()),
+                egui::pos2(strip.left() + depth, lane.bottom()),
             )
         }
     }
@@ -277,8 +305,10 @@ mod tests {
         let content = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 200.0));
         let lane = lane_rect(strip, content, 20.0, 1, Orientation::Horizontal);
         let black = black_key_rect(strip, lane, Orientation::Horizontal);
-        assert!(approx(black.width(), 12.4));
+        assert!(approx(black.width(), 20.0));
         assert!(approx(black.height(), 24.8));
+        assert!(approx(black.left(), lane.left()));
+        assert!(approx(black.right(), lane.right()));
         assert!(approx(black.top(), 0.0));
     }
 
@@ -289,9 +319,10 @@ mod tests {
         let lane = lane_rect(strip, content, 20.0, 1, Orientation::Vertical);
         let black = black_key_rect(strip, lane, Orientation::Vertical);
         assert!(approx(black.width(), 28.52));
-        assert!(approx(black.height(), 12.4));
+        assert!(approx(black.height(), 20.0));
         assert!(approx(black.left(), 0.0));
-        assert!(approx(black.right(), 28.52));
+        assert!(approx(black.top(), lane.top()));
+        assert!(approx(black.bottom(), lane.bottom()));
     }
 
     #[test]

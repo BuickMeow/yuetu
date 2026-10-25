@@ -34,15 +34,21 @@ pub fn show(
         result.source_size.1.max(1) as f32,
     );
     let horizontal = result.time_axis == TimeAxis::Horizontal;
-    let available = ui.available_rect_before_wrap();
-    let (roll_rect, piano_rect) = split_view(available, horizontal);
-    ui.advance_cursor_after_rect(available);
-    let interaction = view.interact_in_rect(ui, roll_rect, display_size, CursorIcon::Crosshair);
+    let ratio = piano::THICKNESS_RATIO;
+    // Feed View2D a virtual canvas that includes the keyboard. The image and
+    // keyboard therefore scale as one fixed-ratio object: no viewport-edge gap,
+    // no separate fixed-height strip.
+    let layout_size = if horizontal {
+        egui::vec2(display_size.x * (1.0 + ratio), display_size.y)
+    } else {
+        egui::vec2(display_size.x, display_size.y * (1.0 + ratio))
+    };
+    let interaction = view.interact(ui, layout_size, CursorIcon::Crosshair);
     let painter = ui.painter_at(interaction.viewport);
-
     painter.rect_filled(interaction.viewport, 0.0, theme::view_bg(ui));
 
-    let content = interaction.content_rect;
+    let (content, piano_rect) = split_keyboard(interaction.content_rect, horizontal);
+
     let key_count = result.keymap.width().max(1) as f32;
     let time_rows = result.time_rows.max(1) as f32;
     let (x_units, y_units) = if horizontal {
@@ -161,6 +167,7 @@ pub fn show(
                 scale_y,
                 horizontal,
                 gpu_target_format,
+                ui.ctx().pixels_per_point(),
             ),
         );
         painter.add(egui::Shape::Callback(callback));
@@ -182,7 +189,11 @@ pub fn show(
 
     // ── Hover ──────────────────────────────────────────────────────
     let mut hovered = None;
-    if let Some(pointer) = interaction.hover_pos_in_content() {
+    if let Some(pointer) = interaction
+        .response
+        .hover_pos()
+        .filter(|pointer| content.contains(*pointer))
+    {
         let (key_position, time_row) = if horizontal {
             (
                 ((content.bottom() - pointer.y) / scale_y.max(1e-6)).floor() as i32,
@@ -224,24 +235,30 @@ pub fn show(
     PreviewOutput { hovered }
 }
 
-fn split_view(available: Rect, horizontal: bool) -> (Rect, Rect) {
-    const MIN_ROLL: f32 = 96.0;
+fn split_keyboard(group: Rect, horizontal: bool) -> (Rect, Rect) {
+    let ratio = piano::THICKNESS_RATIO;
     if horizontal {
-        if available.width() >= piano::THICKNESS + MIN_ROLL {
-            let split = available.left() + piano::THICKNESS;
-            let keys = Rect::from_min_max(available.min, egui::pos2(split, available.bottom()));
-            let roll = Rect::from_min_max(egui::pos2(split, available.top()), available.max);
-            (roll, keys)
-        } else {
-            (available, Rect::NOTHING)
-        }
-    } else if available.height() >= piano::THICKNESS + MIN_ROLL {
-        let split = available.bottom() - piano::THICKNESS;
-        let roll = Rect::from_min_max(available.min, egui::pos2(available.right(), split));
-        let keys = Rect::from_min_max(egui::pos2(available.left(), split), available.max);
-        (roll, keys)
+        let keys_width = group.width() * ratio / (1.0 + ratio);
+        let content = Rect::from_min_max(
+            egui::pos2(group.left() + keys_width, group.top()),
+            group.max,
+        );
+        let keys = Rect::from_min_max(
+            group.min,
+            egui::pos2(group.left() + keys_width, group.bottom()),
+        );
+        (content, keys)
     } else {
-        (available, Rect::NOTHING)
+        let keys_height = group.height() * ratio / (1.0 + ratio);
+        let content = Rect::from_min_max(
+            group.min,
+            egui::pos2(group.right(), group.bottom() - keys_height),
+        );
+        let keys = Rect::from_min_max(
+            egui::pos2(group.left(), group.bottom() - keys_height),
+            group.max,
+        );
+        (content, keys)
     }
 }
 
@@ -341,5 +358,35 @@ fn draw_bar_lines(
                 stroke,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    #[test]
+    fn keyboard_hugs_the_image_and_scales_with_it() {
+        let group = Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(800.0, 856.0));
+        let (content, keys) = split_keyboard(group, false);
+        assert!(close(content.width(), 800.0));
+        assert!(close(content.height(), 800.0));
+        assert!(close(keys.height(), 56.0));
+        assert!(close(keys.top(), content.bottom()));
+        assert!(close(keys.left(), content.left()));
+        assert!(close(keys.right(), content.right()));
+
+        let group = Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(856.0, 800.0));
+        let (content, keys) = split_keyboard(group, true);
+        assert!(close(content.width(), 800.0));
+        assert!(close(content.height(), 800.0));
+        assert!(close(keys.width(), 56.0));
+        assert!(close(keys.right(), content.left()));
+        assert!(close(keys.top(), content.top()));
+        assert!(close(keys.bottom(), content.bottom()));
     }
 }
