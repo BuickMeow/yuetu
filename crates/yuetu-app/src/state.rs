@@ -1033,6 +1033,17 @@ mod tests {
     }
 
     #[test]
+    fn ai_sources_dispatch_to_pdf_or_postscript_backends() {
+        let ctx = egui::Context::default();
+        for (name, pages) in [("vector.ai", 2), ("vector-eps.ai", 1)] {
+            let path =
+                PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata")).join(name);
+            let source = SourceImage::load(&ctx, path).unwrap();
+            assert_eq!(source.vector_page_count(), pages, "{name}");
+        }
+    }
+
+    #[test]
     fn bottom_left_origin_flips_the_displayed_row() {
         assert_eq!(CoordinateOrigin::TopLeft.display_y(0, 100), 0);
         assert_eq!(CoordinateOrigin::TopLeft.display_y(99, 100), 99);
