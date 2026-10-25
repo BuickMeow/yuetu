@@ -184,6 +184,14 @@ impl VectorDocument {
         self.format
     }
 
+    /// Whether the page can contain transparent pixels. PostScript/EPS paper
+    /// is opaque; we still clip the GPU scene to the page polygon, but the
+    /// source stage should show the empty view background around a rotated
+    /// page instead of a transparency checkerboard.
+    pub fn page_has_alpha(&self) -> bool {
+        !matches!(self.backend, Backend::Eps(_))
+    }
+
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }

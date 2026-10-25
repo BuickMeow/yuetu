@@ -39,12 +39,13 @@ pub fn show(
             let hovered = if let Some(vector) = source.vector() {
                 let ctx = ui.ctx().clone();
                 let rotation = source.rotation_deg();
+                let has_alpha = vector.page_has_alpha();
                 stage_image::show_with_texture(
                     ui,
                     view,
                     source.display_size,
                     source.display_size,
-                    true,
+                    has_alpha,
                     checker_texture,
                     |interaction| {
                         vector

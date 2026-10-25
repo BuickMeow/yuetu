@@ -114,6 +114,10 @@ impl VectorSource {
         self.page
     }
 
+    pub fn page_has_alpha(&self) -> bool {
+        self.document.page_has_alpha()
+    }
+
     fn page_size(&self) -> Option<(f32, f32)> {
         self.document.page_size(self.page)
     }
