@@ -127,8 +127,10 @@ fn draw_checkerboard_quad(
             (visible.bottom() - rect.top()) / CHECKER_PERIOD,
         ),
     );
-    let mut mesh = egui::Mesh::default();
-    mesh.texture_id = checker_texture;
+    let mut mesh = egui::Mesh {
+        texture_id: checker_texture,
+        ..Default::default()
+    };
     mesh.add_rect_with_uv(visible, uv, Color32::WHITE);
     painter.add(egui::Shape::mesh(mesh));
 }
@@ -226,7 +228,7 @@ fn draw_rulers(
         y = y.saturating_add(step);
     }
     let top = content_size.1;
-    if top % step != 0 && top >= first_y && top <= last_y {
+    if !top.is_multiple_of(step) && top >= first_y && top <= last_y {
         draw_y_tick(
             painter,
             &font,

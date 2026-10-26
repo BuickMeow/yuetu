@@ -1029,12 +1029,22 @@ impl Preview {
 }
 
 fn image_has_transparency(image: &RgbaImage) -> bool {
-    image.pixels.chunks_exact(4).any(|pixel| pixel[3] < 255)
+    image
+        .pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|pixel| pixel[3] < 255)
 }
 
 fn indexed_to_rgba(indexed: &IndexedImage, palette: &Palette) -> yuetu_core::Result<RgbaImage> {
     let mut pixels = vec![0u8; indexed.width as usize * indexed.height as usize * 4];
-    for (pixel, &index) in pixels.chunks_exact_mut(4).zip(&indexed.indices) {
+    for (pixel, &index) in pixels
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(&indexed.indices)
+    {
         if index < 0 {
             continue;
         }

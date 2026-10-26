@@ -54,17 +54,17 @@ pub fn show(
         .show(ctx, |ui| {
             let (_, response) = ui.allocate_exact_size(hit.size(), Sense::click_and_drag());
             let mut chosen = None;
-            if response.clicked() || response.dragged() {
-                if let Some(pointer) = response.interact_pointer_pos() {
-                    chosen = stops
-                        .iter()
-                        .min_by(|a, b| {
-                            (a.center_y - pointer.y)
-                                .abs()
-                                .total_cmp(&(b.center_y - pointer.y).abs())
-                        })
-                        .map(|stop| stop.stage);
-                }
+            if (response.clicked() || response.dragged())
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                chosen = stops
+                    .iter()
+                    .min_by(|a, b| {
+                        (a.center_y - pointer.y)
+                            .abs()
+                            .total_cmp(&(b.center_y - pointer.y).abs())
+                    })
+                    .map(|stop| stop.stage);
             }
 
             let center_x = x + WIDTH * 0.5;

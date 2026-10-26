@@ -692,25 +692,23 @@ impl eframe::App for YuetuApp {
 
         let mut acted = false;
         if let Some(stage) = stage_rail::show(&ctx, &self.stage_stops, self.stage, root_rect.left())
+            && stage != self.stage
         {
-            if stage != self.stage {
-                self.stage = stage;
-                self.stage_hover = None;
-                if stage == PipelineStage::Source {
-                    if let Some(source) = self.source.as_mut() {
-                        if let Err(error) = source.ensure_display_texture(&ctx) {
-                            self.status =
-                                StatusMessage::error(format!("刷新源图纹理失败：{error}"));
-                        }
-                    }
-                }
-                if stage == PipelineStage::Midi {
-                    if !self.ensure_preview_notes() && !self.jobs.is_running() {
-                        self.schedule_auto_conversion(&ctx, Duration::ZERO);
-                    }
-                }
-                acted = true;
+            self.stage = stage;
+            self.stage_hover = None;
+            if stage == PipelineStage::Source
+                && let Some(source) = self.source.as_mut()
+                && let Err(error) = source.ensure_display_texture(&ctx)
+            {
+                self.status = StatusMessage::error(format!("刷新源图纹理失败：{error}"));
             }
+            if stage == PipelineStage::Midi
+                && !self.ensure_preview_notes()
+                && !self.jobs.is_running()
+            {
+                self.schedule_auto_conversion(&ctx, Duration::ZERO);
+            }
+            acted = true;
         }
 
         if let Some(live) = controls_action.live_setting {
@@ -741,18 +739,18 @@ impl eframe::App for YuetuApp {
                 // The frame strip lives inside the central panel so it spans
                 // only the stage width, directly below the main view. It is
                 // absent for still images.
-                if let Some(source) = self.source.as_mut() {
-                    if source.frame_count() > 1 {
-                        let last_frame = &mut self.frame_strip_last_frame;
-                        let mode = &mut self.frame_strip_mode;
-                        egui::Panel::bottom("frame_strip")
-                            .show_separator_line(false)
-                            .frame(theme::panel_frame(ui, theme::PanelKind::FrameStrip))
-                            .show(ui, |ui| {
-                                frame_strip_output =
-                                    ui::frame_strip::show(ui, source, last_frame, mode);
-                            });
-                    }
+                if let Some(source) = self.source.as_mut()
+                    && source.frame_count() > 1
+                {
+                    let last_frame = &mut self.frame_strip_last_frame;
+                    let mode = &mut self.frame_strip_mode;
+                    egui::Panel::bottom("frame_strip")
+                        .show_separator_line(false)
+                        .frame(theme::panel_frame(ui, theme::PanelKind::FrameStrip))
+                        .show(ui, |ui| {
+                            frame_strip_output =
+                                ui::frame_strip::show(ui, source, last_frame, mode);
+                        });
                 }
 
                 let stage = self.stage;
@@ -947,10 +945,10 @@ impl eframe::App for YuetuApp {
         }
         if self.rotation_scrub_pending && !ctx.input(|input| input.pointer.primary_down()) {
             self.rotation_scrub_pending = false;
-            if let Some(source) = self.source.as_mut() {
-                if let Err(error) = source.finalize_rotation_preview(&ctx) {
-                    self.status = StatusMessage::error(format!("旋转失败：{error}"));
-                }
+            if let Some(source) = self.source.as_mut()
+                && let Err(error) = source.finalize_rotation_preview(&ctx)
+            {
+                self.status = StatusMessage::error(format!("旋转失败：{error}"));
             }
             self.status = StatusMessage::info("正在更新预览…");
             self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);

@@ -209,11 +209,10 @@ fn show_thumbnails(
             if response.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            if response.clicked() || response.dragged() || response.drag_stopped() {
-                if let Some(pos) = pointer {
-                    output.frame =
-                        Some(frame_at(pos.x, content_rect, THUMBNAIL_STRIDE, frame_count));
-                }
+            if (response.clicked() || response.dragged() || response.drag_stopped())
+                && let Some(pos) = pointer
+            {
+                output.frame = Some(frame_at(pos.x, content_rect, THUMBNAIL_STRIDE, frame_count));
             }
             output.scrubbing = response.dragged();
 
@@ -334,14 +333,12 @@ fn show_timeline(
             if response.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            if response.clicked() || response.dragged() || response.drag_stopped() {
-                if let Some(pointer) = response
+            if (response.clicked() || response.dragged() || response.drag_stopped())
+                && let Some(pointer) = response
                     .interact_pointer_pos()
                     .or_else(|| response.hover_pos())
-                {
-                    output.frame =
-                        Some(frame_at(pointer.x, rect, TIMELINE_FRAME_WIDTH, frame_count));
-                }
+            {
+                output.frame = Some(frame_at(pointer.x, rect, TIMELINE_FRAME_WIDTH, frame_count));
             }
             output.scrubbing = response.dragged();
 

@@ -205,15 +205,16 @@ pub fn show(
                 ((content.bottom() - pointer.y) / scale_y.max(1e-6)).floor() as i32,
             )
         };
-        if key_position >= 0 && time_row >= 0 {
-            if let Some(key) = keymap.key_at(key_position as u32) {
-                hovered = Some(StageHover::Midi {
-                    key,
-                    tick: (time_row as u32)
-                        .min(result.time_rows)
-                        .saturating_mul(u32::from(midi_config.ticks_per_pixel.max(1))),
-                });
-            }
+        if key_position >= 0
+            && time_row >= 0
+            && let Some(key) = keymap.key_at(key_position as u32)
+        {
+            hovered = Some(StageHover::Midi {
+                key,
+                tick: (time_row as u32)
+                    .min(result.time_rows)
+                    .saturating_mul(u32::from(midi_config.ticks_per_pixel.max(1))),
+            });
         }
 
         painter.line_segment(

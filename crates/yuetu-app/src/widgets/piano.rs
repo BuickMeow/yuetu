@@ -175,6 +175,7 @@ fn draw_edge(painter: &Painter, strip: Rect, orientation: Orientation, line: Col
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_label(
     painter: &Painter,
     strip: Rect,

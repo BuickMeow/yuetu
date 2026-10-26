@@ -162,7 +162,7 @@ async fn run() {
         .get_mapped_range()
         .unwrap()
         .chunks_exact(bytes_per_row as usize)
-        .flat_map(|row| row[..usize::from(width) * 4].chunks_exact(4))
+        .flat_map(|row| row[..usize::from(width) * 4].as_chunks::<4>().0.iter())
         .filter(|pixel| pixel[3] != 0)
         .count();
     readback.unmap();

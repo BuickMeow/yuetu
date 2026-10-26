@@ -18,6 +18,7 @@ pub struct Action {
     pub zoom_preset: Option<ZoomPreset>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     status: &StatusMessage,

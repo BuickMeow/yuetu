@@ -43,7 +43,7 @@ struct EpsBackend {
 }
 
 enum Backend {
-    Svg(usvg::Tree),
+    Svg(Box<usvg::Tree>),
     Pdf(hayro::hayro_syntax::Pdf),
     Eps(EpsBackend),
 }
@@ -247,7 +247,7 @@ impl VectorDocument {
             let size = tree.size();
             return Ok(Self {
                 format: VectorFormat::Svg,
-                backend: Backend::Svg(tree),
+                backend: Backend::Svg(Box::new(tree)),
                 pages: vec![PageInfo {
                     width: size.width(),
                     height: size.height(),
@@ -1099,7 +1099,14 @@ mod tests {
             .render_page_rotated_to_size(0, 128, 1536, 31.0)
             .unwrap();
         assert_eq!((image.width, image.height), (128, 1536));
-        assert!(image.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
+        assert!(
+            image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] > 0)
+        );
     }
 
     #[test]

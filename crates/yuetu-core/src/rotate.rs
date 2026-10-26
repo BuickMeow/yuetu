@@ -263,6 +263,13 @@ mod tests {
         let rotated = rotate_image(&quad(), 45.0).unwrap();
         assert!(rotated.width > 2);
         assert!(rotated.height > 2);
-        assert!(rotated.pixels.chunks_exact(4).any(|pixel| pixel[3] < 255));
+        assert!(
+            rotated
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[3] < 255)
+        );
     }
 }

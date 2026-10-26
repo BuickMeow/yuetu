@@ -62,7 +62,7 @@ impl RgbaImage {
 
     pub fn new(width: u32, height: u32, color: Color) -> Self {
         let mut pixels = vec![0; width as usize * height as usize * 4];
-        for chunk in pixels.chunks_exact_mut(4) {
+        for chunk in pixels.as_chunks_mut::<4>().0 {
             chunk.copy_from_slice(&[color.r, color.g, color.b, color.a]);
         }
         Self {
@@ -161,11 +161,7 @@ fn decode_animation<'a>(decoder: impl AnimationDecoder<'a>) -> Result<ImageSeque
         }
 
         let (numerator, denominator) = frame.delay().numer_denom_ms();
-        let delay_ms = if denominator == 0 {
-            0
-        } else {
-            numerator / denominator
-        };
+        let delay_ms = numerator.checked_div(denominator).unwrap_or(0);
         let buffer = frame.into_buffer();
         let (width, height) = buffer.dimensions();
         let image = RgbaImage::from_rgba(width, height, buffer.into_raw())?;
@@ -203,7 +199,7 @@ fn exact_source_palette(frames: &[RgbaImage]) -> Option<Palette> {
     let mut seen = HashSet::new();
     let mut colors = Vec::new();
     for frame in frames {
-        for px in frame.pixels.chunks_exact(4) {
+        for px in frame.pixels.as_chunks::<4>().0 {
             if px[3] < 128 {
                 continue;
             }

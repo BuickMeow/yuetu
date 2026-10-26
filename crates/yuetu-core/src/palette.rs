@@ -84,8 +84,8 @@ impl Palette {
             }
             let frame_weight = u64::from(delays_ms.get(frame_index).copied().unwrap_or(0).max(1));
 
-            for px in frame.pixels.chunks_exact(4) {
-                if processed % 65_536 == 0 {
+            for px in frame.pixels.as_chunks::<4>().0 {
+                if processed.is_multiple_of(65_536) {
                     if is_cancelled(cancel) {
                         return Err(Error::Cancelled);
                     }
@@ -229,8 +229,8 @@ fn weighted_kmeans(
         for entry in entries {
             let index = nearest_center(entry.rgb, &centers);
             weights[index] += entry.weight;
-            for channel in 0..3 {
-                sums[index][channel] += entry.rgb[channel] * entry.weight;
+            for (sum, value) in sums[index].iter_mut().zip(entry.rgb) {
+                *sum += value * entry.weight;
             }
         }
 

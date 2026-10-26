@@ -21,7 +21,8 @@ pub fn vertical(
 ) -> Response {
     let line = Rect::from_x_y_ranges((x - LINE_W * 0.5)..=(x + LINE_W * 0.5), y_range);
     let hit = line.expand2(egui::vec2(HIT_PAD, 0.0));
-    let response = Area::new(Id::unique(id_salt))
+
+    Area::new(Id::unique(id_salt))
         .order(Order::Foreground)
         .fixed_pos(hit.min)
         .show(ctx, |ui| {
@@ -50,8 +51,7 @@ pub fn vertical(
             }
             response
         })
-        .inner;
-    response
+        .inner
 }
 
 fn split_color(ui: &Ui, active: bool, hovered: bool) -> egui::Color32 {

@@ -177,12 +177,11 @@ impl View2D {
                         source,
                         ..
                     } = event
+                        && let Some(source) = scroll_source_for(*unit, *source)
                     {
-                        if let Some(source) = scroll_source_for(*unit, *source) {
-                            event_source = Some(source);
-                            if source == ScrollSource::Wheel {
-                                wheel_y += delta.y;
-                            }
+                        event_source = Some(source);
+                        if source == ScrollSource::Wheel {
+                            wheel_y += delta.y;
                         }
                     }
                 }
@@ -343,6 +342,25 @@ pub struct ViewInteraction {
     pub scale: f32,
 }
 
+impl ViewInteraction {
+    /// Pointer position inside the content, normalized to `[0, 1)`, if any.
+    pub fn hover_uv(&self) -> Option<Vec2> {
+        if !self.response.hovered() {
+            return None;
+        }
+        let pointer = self.response.hover_pos()?;
+        if !self.content_rect.contains(pointer) {
+            return None;
+        }
+        Some(Vec2::new(
+            ((pointer.x - self.content_rect.left()) / self.content_rect.width())
+                .clamp(0.0, 0.999_999),
+            ((pointer.y - self.content_rect.top()) / self.content_rect.height())
+                .clamp(0.0, 0.999_999),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,24 +451,5 @@ mod tests {
 
         assert_eq!(view.pan, before);
         assert_eq!(view.zoom, 120.0);
-    }
-}
-
-impl ViewInteraction {
-    /// Pointer position inside the content, normalized to `[0, 1)`, if any.
-    pub fn hover_uv(&self) -> Option<Vec2> {
-        if !self.response.hovered() {
-            return None;
-        }
-        let pointer = self.response.hover_pos()?;
-        if !self.content_rect.contains(pointer) {
-            return None;
-        }
-        Some(Vec2::new(
-            ((pointer.x - self.content_rect.left()) / self.content_rect.width())
-                .clamp(0.0, 0.999_999),
-            ((pointer.y - self.content_rect.top()) / self.content_rect.height())
-                .clamp(0.0, 0.999_999),
-        ))
     }
 }
