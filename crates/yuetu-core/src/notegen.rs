@@ -189,6 +189,7 @@ pub fn generate_notes_with_progress_on_grid(
             *count += chunk_count;
         }
     }
+    report(progress, Stage::Notes, 0.5);
 
     notes = sort_notes_by_start(notes, time_steps);
 

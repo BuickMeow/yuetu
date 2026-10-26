@@ -18,6 +18,7 @@ eframe = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }
 egui_material_icons = { workspace = true }
+rayon = "1"
 rfd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

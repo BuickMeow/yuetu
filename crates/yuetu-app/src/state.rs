@@ -1,6 +1,7 @@
 //! Application state that outlives a single frame.
 
 use egui::{TextureFilter, TextureHandle, TextureOptions, TextureWrapMode};
+use rayon::prelude::*;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1029,29 +1030,22 @@ impl Preview {
 }
 
 fn image_has_transparency(image: &RgbaImage) -> bool {
-    image
-        .pixels
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .any(|pixel| pixel[3] < 255)
+    image.pixels.par_chunks(4).any(|pixel| pixel[3] < 255)
 }
 
 fn indexed_to_rgba(indexed: &IndexedImage, palette: &Palette) -> yuetu_core::Result<RgbaImage> {
     let mut pixels = vec![0u8; indexed.width as usize * indexed.height as usize * 4];
-    for (pixel, &index) in pixels
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip(&indexed.indices)
-    {
-        if index < 0 {
-            continue;
-        }
-        if let Some(color) = palette.colors.get(index as usize) {
-            pixel.copy_from_slice(&[color.r, color.g, color.b, color.a]);
-        }
-    }
+    pixels
+        .par_chunks_mut(4)
+        .zip(indexed.indices.par_iter())
+        .for_each(|(pixel, &index)| {
+            if index < 0 {
+                return;
+            }
+            if let Some(color) = palette.colors.get(index as usize) {
+                pixel.copy_from_slice(&[color.r, color.g, color.b, color.a]);
+            }
+        });
     RgbaImage::from_rgba(indexed.width, indexed.height, pixels)
 }
 

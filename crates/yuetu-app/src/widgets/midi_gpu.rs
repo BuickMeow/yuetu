@@ -11,6 +11,7 @@ use eframe::egui::{self, PaintCallbackInfo};
 use eframe::egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor};
 use eframe::wgpu;
 use eframe::wgpu::util::DeviceExt;
+use rayon::prelude::*;
 use yuetu_core::{Color, ConversionResult};
 
 #[repr(C)]
@@ -36,30 +37,31 @@ impl MidiGpuData {
             }
         }
 
-        let mut instances = Vec::with_capacity(result.notes.len());
-        for note in &result.notes {
-            let Some(column) = key_columns[note.key as usize] else {
-                continue;
-            };
-            let color = result
-                .palette
-                .colors
-                .get(note.track as usize)
-                .copied()
-                .unwrap_or(Color::WHITE);
-            instances.push(MidiNoteInstance {
-                column,
-                start: note.start as f32,
-                end: note.end as f32,
-                _pad: 0.0,
-                color: [
-                    f32::from(color.r) / 255.0,
-                    f32::from(color.g) / 255.0,
-                    f32::from(color.b) / 255.0,
-                    f32::from(color.a) / 255.0,
-                ],
-            });
-        }
+        let instances: Vec<MidiNoteInstance> = result
+            .notes
+            .par_iter()
+            .filter_map(|note| {
+                let column = key_columns[note.key as usize]?;
+                let color = result
+                    .palette
+                    .colors
+                    .get(note.track as usize)
+                    .copied()
+                    .unwrap_or(Color::WHITE);
+                Some(MidiNoteInstance {
+                    column,
+                    start: note.start as f32,
+                    end: note.end as f32,
+                    _pad: 0.0,
+                    color: [
+                        f32::from(color.r) / 255.0,
+                        f32::from(color.g) / 255.0,
+                        f32::from(color.b) / 255.0,
+                        f32::from(color.a) / 255.0,
+                    ],
+                })
+            })
+            .collect();
 
         Self { instances }
     }

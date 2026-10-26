@@ -5075,6 +5075,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "egui_material_icons",
+ "rayon",
  "rfd",
  "tracing",
  "tracing-subscriber",
