@@ -14,6 +14,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rayon::prelude::*;
+
 use crate::error::{Error, Result};
 use crate::keymap::KeyMap;
 use crate::layout::TimeAxis;
@@ -121,9 +123,6 @@ pub fn generate_notes_with_progress_on_grid(
     report(progress, Stage::Notes, 0.0);
 
     let width = indexed.width as usize;
-    let mut notes = Vec::new();
-    let mut count_by_track = vec![0usize; track_count];
-
     let (time_steps, key_extent) = match time_axis {
         TimeAxis::Vertical => (indexed.height, indexed.width),
         TimeAxis::Horizontal => (indexed.width, indexed.height),
@@ -138,28 +137,156 @@ pub fn generate_notes_with_progress_on_grid(
         }
     }
 
+    // Notes only depend on time within one key slot, so key slots are the
+    // parallel axis. 16 consecutive slots keep vertical reads on one cache
+    // line and still give enough chunks for a 128-key map.
+    const KEY_SLOT_CHUNK: usize = 16;
+    let chunks: Vec<&[(u32, u8)]> = keys.chunks(KEY_SLOT_CHUNK).collect();
+    let scanned: Vec<(Vec<Note>, Vec<usize>)> = if chunks.len() <= 1 {
+        chunks
+            .into_iter()
+            .map(|chunk| {
+                scan_key_chunk(
+                    indexed,
+                    chunk,
+                    width,
+                    key_extent,
+                    time_steps,
+                    time_axis,
+                    track_count,
+                    max_note_length,
+                    measure_from_start,
+                    cancel,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        chunks
+            .into_par_iter()
+            .map(|chunk| {
+                scan_key_chunk(
+                    indexed,
+                    chunk,
+                    width,
+                    key_extent,
+                    time_steps,
+                    time_axis,
+                    track_count,
+                    max_note_length,
+                    measure_from_start,
+                    cancel,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    let mut count_by_track = vec![0usize; track_count];
+    let total_notes = scanned.iter().map(|(notes, _)| notes.len()).sum();
+    let mut notes = Vec::with_capacity(total_notes);
+    for (chunk_notes, chunk_counts) in scanned {
+        notes.extend(chunk_notes);
+        for (count, chunk_count) in count_by_track.iter_mut().zip(chunk_counts) {
+            *count += chunk_count;
+        }
+    }
+
+    notes = sort_notes_by_start(notes, time_steps);
+
+    report(progress, Stage::Notes, 1.0);
+    Ok((notes, count_by_track))
+}
+
+/// Sort notes by `(start, track, key, end)`.
+///
+/// Each key produces at most one note per start tick, so bucketing by start
+/// keeps every bucket tiny. This avoids an O(N log N) sort over millions of
+/// notes while preserving the exact output order.
+fn sort_notes_by_start(notes: Vec<Note>, time_steps: u32) -> Vec<Note> {
+    if notes.len() < 2 {
+        return notes;
+    }
+    let bucket_count = time_steps as usize;
+    let mut offsets = vec![0usize; bucket_count + 1];
+    for note in &notes {
+        let bucket = note.start as usize;
+        if bucket < bucket_count {
+            offsets[bucket + 1] += 1;
+        }
+    }
+    for bucket in 0..bucket_count {
+        offsets[bucket + 1] += offsets[bucket];
+    }
+
+    let mut cursor = offsets.clone();
+    let mut sorted = vec![
+        Note {
+            key: 0,
+            track: 0,
+            start: 0,
+            end: 0,
+        };
+        notes.len()
+    ];
+    for note in notes {
+        let bucket = note.start as usize;
+        if bucket >= bucket_count {
+            continue;
+        }
+        sorted[cursor[bucket]] = note;
+        cursor[bucket] += 1;
+    }
+    for bucket in 0..bucket_count {
+        sorted[offsets[bucket]..offsets[bucket + 1]].sort_unstable_by(|a, b| {
+            a.track
+                .cmp(&b.track)
+                .then_with(|| a.key.cmp(&b.key))
+                .then_with(|| a.end.cmp(&b.end))
+        });
+    }
+    sorted
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_key_chunk(
+    indexed: &IndexedImage,
+    keys: &[(u32, u8)],
+    width: usize,
+    key_extent: u32,
+    time_steps: u32,
+    time_axis: TimeAxis,
+    track_count: usize,
+    max_note_length: u32,
+    measure_from_start: bool,
+    cancel: &AtomicBool,
+) -> Result<(Vec<Note>, Vec<usize>)> {
+    let mut notes = Vec::new();
+    let mut count_by_track = vec![0usize; track_count];
     let mut key_color = vec![TRANSPARENT_ID; keys.len()];
     let mut key_start = vec![0u32; keys.len()];
     let mut key_last_on = vec![0u32; keys.len()];
-
-    let mut time = 0u32;
+    let key_offsets: Vec<usize> = keys
+        .iter()
+        .map(|&(position, _)| match time_axis {
+            TimeAxis::Vertical => position as usize,
+            TimeAxis::Horizontal => (key_extent - 1 - position) as usize * width,
+        })
+        .collect();
 
     for step in 0..time_steps {
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
+        let step_offset = match time_axis {
+            TimeAxis::Vertical => (time_steps - 1 - step) as usize * width,
+            TimeAxis::Horizontal => step as usize,
+        };
         let grid_retrigger = max_note_length > 0
             && measure_from_start
-            && time > 0
-            && time.is_multiple_of(max_note_length);
+            && step > 0
+            && step.is_multiple_of(max_note_length);
 
-        for (slot, &(position, key)) in keys.iter().enumerate() {
-            let index = match time_axis {
-                TimeAxis::Vertical => (time_steps - 1 - step) as usize * width + position as usize,
-                TimeAxis::Horizontal => {
-                    (key_extent - 1 - position) as usize * width + step as usize
-                }
-            };
+        for (slot, &(_, key)) in keys.iter().enumerate() {
+            let index = step_offset + key_offsets[slot];
             let mut new_color = indexed.indices[index];
             if new_color < 0 || new_color as usize >= track_count {
                 new_color = TRANSPARENT_ID;
@@ -171,7 +298,7 @@ pub fn generate_notes_with_progress_on_grid(
                 && if measure_from_start {
                     grid_retrigger
                 } else {
-                    time.saturating_sub(key_last_on[slot]) >= max_note_length
+                    step.saturating_sub(key_last_on[slot]) >= max_note_length
                 };
 
             if new_color != old_color || force_retrigger {
@@ -183,27 +310,17 @@ pub fn generate_notes_with_progress_on_grid(
                             key,
                             track: old_color as u16,
                             start: key_start[slot],
-                            end: time,
+                            end: step,
                         },
                     );
                 }
 
                 key_color[slot] = new_color;
                 if new_color >= 0 {
-                    key_start[slot] = time;
-                    key_last_on[slot] = time;
+                    key_start[slot] = step;
+                    key_last_on[slot] = step;
                 }
             }
-        }
-
-        time = time.saturating_add(1);
-
-        if step % 16 == 0 && time_steps > 0 {
-            report(
-                progress,
-                Stage::Notes,
-                (step + 1) as f32 / time_steps as f32,
-            );
         }
     }
 
@@ -220,14 +337,11 @@ pub fn generate_notes_with_progress_on_grid(
                 key,
                 track: color as u16,
                 start: key_start[slot],
-                end: time,
+                end: time_steps,
             },
         );
     }
 
-    notes.sort_unstable_by_key(|note| (note.start, note.track, note.key, note.end));
-
-    report(progress, Stage::Notes, 1.0);
     Ok((notes, count_by_track))
 }
 
@@ -270,6 +384,38 @@ mod tests {
             }
         );
         assert_eq!(counts, vec![1]);
+    }
+
+    #[test]
+    fn parallel_key_chunks_keep_notes_sorted() {
+        let width = 32;
+        let height = 8;
+        let mut indices = vec![0i32; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                indices[y * width + x] = ((x + y) % 2) as i32;
+            }
+        }
+        let indexed = IndexedImage {
+            width: width as u32,
+            height: height as u32,
+            indices,
+        };
+        let (notes, counts) = generate_notes(&indexed, &keymap(60, 91), 2, 0, false);
+
+        assert!(!notes.is_empty());
+        assert!(notes.windows(2).all(|pair| (
+            pair[0].start,
+            pair[0].track,
+            pair[0].key,
+            pair[0].end
+        ) <= (
+            pair[1].start,
+            pair[1].track,
+            pair[1].key,
+            pair[1].end
+        )));
+        assert_eq!(counts.iter().sum::<usize>(), notes.len());
     }
 
     #[test]

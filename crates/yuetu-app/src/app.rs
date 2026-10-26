@@ -481,7 +481,7 @@ impl YuetuApp {
                                     .as_ref()
                                     .is_some_and(|preview| preview.result.notes_generated)
                             {
-                                self.ensure_preview_notes();
+                                self.schedule_auto_conversion(ctx, Duration::ZERO);
                             }
                         }
                         Err(error) => {
@@ -597,6 +597,15 @@ impl YuetuApp {
         })
     }
 
+    fn preview_has_notes(&self) -> bool {
+        let config = self.conversion_config();
+        self.preview.as_ref().is_some_and(|preview| {
+            preview.result.notes_generated
+                && preview.config == config
+                && preview.source_revision == self.source_revision
+        })
+    }
+
     fn clamp_panel_widths(&mut self, total_width: f32) {
         const MIN_CENTER: f32 = 420.0;
         let max_left = (total_width - stage_rail::WIDTH - MIN_CENTER).clamp(220.0, 560.0);
@@ -702,9 +711,7 @@ impl eframe::App for YuetuApp {
             {
                 self.status = StatusMessage::error(format!("刷新源图纹理失败：{error}"));
             }
-            if stage == PipelineStage::Midi
-                && !self.ensure_preview_notes()
-                && !self.jobs.is_running()
+            if stage == PipelineStage::Midi && !self.preview_has_notes() && !self.jobs.is_running()
             {
                 self.schedule_auto_conversion(&ctx, Duration::ZERO);
             }

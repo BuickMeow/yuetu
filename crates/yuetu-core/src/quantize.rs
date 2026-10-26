@@ -6,6 +6,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rayon::prelude::*;
+
 use crate::color::Color;
 use crate::error::{Error, Result};
 use crate::image::RgbaImage;
@@ -54,21 +56,37 @@ pub fn quantize_with_progress(
         });
     }
 
-    for y in 0..image.height {
+    let width = image.width as usize;
+    let height = image.height as usize;
+    if width == 0 || height == 0 {
+        report(progress, Stage::Quantize, 1.0);
+        return Ok(IndexedImage {
+            width: image.width,
+            height: image.height,
+            indices,
+        });
+    }
+    let rows_per_batch = height.div_ceil(rayon::current_num_threads().max(1)).max(1);
+    for (batch_index, batch) in indices.chunks_mut(rows_per_batch * width).enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return Err(Error::Cancelled);
         }
-        for x in 0..image.width {
-            let color: Color = image.pixel_unchecked(x, y);
-            indices[y as usize * image.width as usize + x as usize] = palette.nearest_index(color);
-        }
-        if y % 16 == 0 && image.height > 0 {
-            report(
-                progress,
-                Stage::Quantize,
-                (y + 1) as f32 / image.height as f32,
-            );
-        }
+        let base_y = batch_index * rows_per_batch;
+        batch
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(row_index, row)| {
+                let y = (base_y + row_index) as u32;
+                for (x, index) in row.iter_mut().enumerate() {
+                    let color: Color = image.pixel_unchecked(x as u32, y);
+                    *index = palette.nearest_index(color);
+                }
+            });
+        report(
+            progress,
+            Stage::Quantize,
+            ((base_y + rows_per_batch).min(height)) as f32 / height as f32,
+        );
     }
 
     report(progress, Stage::Quantize, 1.0);

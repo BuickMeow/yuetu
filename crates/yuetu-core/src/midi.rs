@@ -8,6 +8,7 @@ use std::path::Path;
 
 use midly::num::{u4, u7, u15, u24, u28};
 use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
+use rayon::prelude::*;
 
 use crate::convert::ConversionResult;
 use crate::error::{Error, Result};
@@ -121,8 +122,16 @@ pub fn write_midi(path: &Path, result: &ConversionResult, config: &MidiOutputCon
         Vec::new()
     };
 
-    let mut tracks: Vec<Vec<TimedEvent>> = (0..midi_track_count)
-        .map(|_| Vec::with_capacity(64))
+    let mut track_capacities = vec![64usize; midi_track_count];
+    for note in &result.notes {
+        let color_index = note.track as usize;
+        if color_index < palette_len {
+            track_capacities[color_index / 16] += 2;
+        }
+    }
+    let mut tracks: Vec<Vec<TimedEvent>> = track_capacities
+        .iter()
+        .map(|&capacity| Vec::with_capacity(capacity))
         .collect();
 
     tracks[0].push(TimedEvent {
@@ -172,31 +181,33 @@ pub fn write_midi(path: &Path, result: &ConversionResult, config: &MidiOutputCon
         });
     }
 
-    let mut midi_tracks: Vec<Vec<TrackEvent<'_>>> = Vec::with_capacity(midi_track_count);
-    for mut events in tracks {
-        events.sort_by_key(|event| (event.tick, event.priority));
+    let midi_tracks: Vec<Vec<TrackEvent<'_>>> = tracks
+        .into_par_iter()
+        .map(|mut events| {
+            events.sort_by_key(|event| (event.tick, event.priority));
 
-        let mut last_tick = 0u64;
-        let mut out = Vec::with_capacity(events.len() + 1);
-        for event in events {
-            let delta = event.tick.saturating_sub(last_tick);
-            if delta > MAX_DELTA {
-                return Err(Error::Midi(format!(
-                    "事件间隔 {delta} ticks 超过 SMF 的 u28 上限；请减小 Ticks/px 或起始偏移"
-                )));
+            let mut last_tick = 0u64;
+            let mut out = Vec::with_capacity(events.len() + 1);
+            for event in events {
+                let delta = event.tick.saturating_sub(last_tick);
+                if delta > MAX_DELTA {
+                    return Err(Error::Midi(format!(
+                        "事件间隔 {delta} ticks 超过 SMF 的 u28 上限；请减小 Ticks/px 或起始偏移"
+                    )));
+                }
+                out.push(TrackEvent {
+                    delta: u28::new(delta as u32),
+                    kind: event.kind.into_track_event(&color_payloads),
+                });
+                last_tick = event.tick;
             }
             out.push(TrackEvent {
-                delta: u28::new(delta as u32),
-                kind: event.kind.into_track_event(&color_payloads),
+                delta: u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
             });
-            last_tick = event.tick;
-        }
-        out.push(TrackEvent {
-            delta: u28::new(0),
-            kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
-        });
-        midi_tracks.push(out);
-    }
+            Ok(out)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let header = Header {
         format: Format::Parallel,

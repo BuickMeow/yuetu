@@ -9,4 +9,5 @@ license.workspace = true
 [dependencies]
 image = { workspace = true }
 midly = { workspace = true }
+rayon = "1"
 thiserror = { workspace = true }

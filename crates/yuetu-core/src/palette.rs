@@ -11,6 +11,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use rayon::prelude::*;
+
 use crate::color::Color;
 use crate::error::{Error, Result};
 use crate::image::RgbaImage;
@@ -74,48 +76,98 @@ impl Palette {
             .iter()
             .map(|frame| frame.pixels.len() as u64 / 4)
             .sum();
-        let mut bins = vec![Bin::default(); BIN_COUNT];
-        let mut processed = 0u64;
 
         report(progress, Stage::Palette, 0.0);
+
+        // Split every frame into row bands. Bands from all frames are one
+        // parallel task pool; each worker keeps a private integer histogram
+        // and the merge is exact regardless of task order.
+        const BAND_ROWS: usize = 128;
+        let mut tasks: Vec<(&RgbaImage, usize, usize, u64)> = Vec::new();
         for (frame_index, frame) in frames.iter().enumerate() {
+            let frame_weight = u64::from(delays_ms.get(frame_index).copied().unwrap_or(0).max(1));
+            let height = frame.height as usize;
+            let mut start = 0;
+            while start < height {
+                let end = (start + BAND_ROWS).min(height);
+                tasks.push((*frame, start, end, frame_weight));
+                start = end;
+            }
+        }
+
+        if total_pixels == 0 {
+            report(progress, Stage::Palette, 1.0);
+            return Ok(Self::default());
+        }
+
+        let batch_size = tasks
+            .len()
+            .div_ceil(rayon::current_num_threads().max(1))
+            .max(1);
+        let mut bins = vec![Bin::default(); BIN_COUNT];
+        let mut processed = 0u64;
+        for batch in tasks.chunks(batch_size) {
             if is_cancelled(cancel) {
                 return Err(Error::Cancelled);
             }
-            let frame_weight = u64::from(delays_ms.get(frame_index).copied().unwrap_or(0).max(1));
-
-            for px in frame.pixels.as_chunks::<4>().0 {
-                if processed.is_multiple_of(65_536) {
-                    if is_cancelled(cancel) {
-                        return Err(Error::Cancelled);
-                    }
-                    if total_pixels > 0 {
-                        report(
-                            progress,
-                            Stage::Palette,
-                            processed as f32 / total_pixels as f32,
-                        );
-                    }
-                }
-
-                let alpha = px[3];
-                if alpha < 128 {
-                    processed += 1;
-                    continue;
-                }
-                let r = u16::from(px[0]);
-                let g = u16::from(px[1]);
-                let b = u16::from(px[2]);
-                let key = (u32::from(px[0] >> 3) << 10)
-                    | (u32::from(px[1] >> 3) << 5)
-                    | u32::from(px[2] >> 3);
-                let bin = &mut bins[key as usize];
-                bin.weight += frame_weight;
-                bin.r += u64::from(r) * frame_weight;
-                bin.g += u64::from(g) * frame_weight;
-                bin.b += u64::from(b) * frame_weight;
-                processed += 1;
+            let partial = batch
+                .par_iter()
+                .try_fold(
+                    || vec![Bin::default(); BIN_COUNT],
+                    |mut bins, &(frame, start, end, frame_weight)| {
+                        if is_cancelled(cancel) {
+                            return Err(Error::Cancelled);
+                        }
+                        let width = frame.width as usize;
+                        for y in start..end {
+                            let row = &frame.pixels[y * width * 4..(y + 1) * width * 4];
+                            for px in row.as_chunks::<4>().0 {
+                                let alpha = px[3];
+                                if alpha < 128 {
+                                    continue;
+                                }
+                                let r = u16::from(px[0]);
+                                let g = u16::from(px[1]);
+                                let b = u16::from(px[2]);
+                                let key = (u32::from(px[0] >> 3) << 10)
+                                    | (u32::from(px[1] >> 3) << 5)
+                                    | u32::from(px[2] >> 3);
+                                let bin = &mut bins[key as usize];
+                                bin.weight += frame_weight;
+                                bin.r += u64::from(r) * frame_weight;
+                                bin.g += u64::from(g) * frame_weight;
+                                bin.b += u64::from(b) * frame_weight;
+                            }
+                        }
+                        Ok(bins)
+                    },
+                )
+                .try_reduce(
+                    || vec![Bin::default(); BIN_COUNT],
+                    |mut left, right| {
+                        for (left, right) in left.iter_mut().zip(right) {
+                            left.weight += right.weight;
+                            left.r += right.r;
+                            left.g += right.g;
+                            left.b += right.b;
+                        }
+                        Ok(left)
+                    },
+                )?;
+            for (left, right) in bins.iter_mut().zip(partial) {
+                left.weight += right.weight;
+                left.r += right.r;
+                left.g += right.g;
+                left.b += right.b;
             }
+            for &(frame, start, end, _) in batch {
+                processed += (end - start) as u64 * u64::from(frame.width);
+            }
+            report(
+                progress,
+                Stage::Palette,
+                (processed as f32 / total_pixels as f32).min(1.0),
+            );
         }
 
         let mut entries: Vec<WeightedColor> = bins
@@ -214,7 +266,7 @@ fn weighted_kmeans(
     max_colors: usize,
     cancel: Option<&AtomicBool>,
 ) -> Result<Vec<Color>> {
-    let mut centers = initial_centers(entries, max_colors);
+    let mut centers = initial_centers(entries, max_colors, cancel)?;
     if centers.is_empty() {
         return Ok(Vec::new());
     }
@@ -226,8 +278,11 @@ fn weighted_kmeans(
 
         let mut sums = vec![[0.0f64; 3]; centers.len()];
         let mut weights = vec![0.0f64; centers.len()];
-        for entry in entries {
-            let index = nearest_center(entry.rgb, &centers);
+        let assignments: Vec<usize> = entries
+            .par_iter()
+            .map(|entry| nearest_center(entry.rgb, &centers))
+            .collect();
+        for (entry, &index) in entries.iter().zip(&assignments) {
             weights[index] += entry.weight;
             for (sum, value) in sums[index].iter_mut().zip(entry.rgb) {
                 *sum += value * entry.weight;
@@ -258,8 +313,11 @@ fn weighted_kmeans(
     // frequently sounding colors at the front, like the old popularity
     // palette, while the colors themselves are cluster centroids.
     let mut cluster_weights = vec![0.0f64; centers.len()];
-    for entry in entries {
-        let index = nearest_center(entry.rgb, &centers);
+    let assignments: Vec<usize> = entries
+        .par_iter()
+        .map(|entry| nearest_center(entry.rgb, &centers))
+        .collect();
+    for (entry, &index) in entries.iter().zip(&assignments) {
         cluster_weights[index] += entry.weight;
     }
 
@@ -284,10 +342,14 @@ fn weighted_kmeans(
     Ok(colors)
 }
 
-fn initial_centers(entries: &[WeightedColor], max_colors: usize) -> Vec<[f64; 3]> {
+fn initial_centers(
+    entries: &[WeightedColor],
+    max_colors: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<[f64; 3]>> {
     let mut centers = Vec::with_capacity(max_colors);
     let Some(first) = entries.first() else {
-        return centers;
+        return Ok(centers);
     };
     centers.push(first.rgb);
 
@@ -295,29 +357,37 @@ fn initial_centers(entries: &[WeightedColor], max_colors: usize) -> Vec<[f64; 3]
     // largest "distance × weight", which favors both distant and common
     // colors. Selection is deterministic because entries are already sorted.
     while centers.len() < max_colors {
-        let mut best = None;
-        let mut best_score = 0.0f64;
-        for entry in entries {
-            let nearest = centers
-                .iter()
-                .map(|center| distance_sq(entry.rgb, *center))
-                .fold(f64::INFINITY, f64::min);
-            let score = nearest * entry.weight;
-            if score > best_score {
-                best_score = score;
-                best = Some(entry.rgb);
-            }
+        if is_cancelled(cancel) {
+            return Err(Error::Cancelled);
         }
-        let Some(next) = best else {
-            break;
-        };
-        if best_score <= f64::EPSILON {
+        let best = entries
+            .par_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let nearest = centers
+                    .iter()
+                    .map(|center| distance_sq(entry.rgb, *center))
+                    .fold(f64::INFINITY, f64::min);
+                (index, nearest * entry.weight)
+            })
+            .reduce(
+                || (usize::MAX, 0.0),
+                |a, b| {
+                    if b.1 > a.1 || (b.1 == a.1 && b.0 < a.0) {
+                        b
+                    } else {
+                        a
+                    }
+                },
+            );
+        let (index, best_score) = best;
+        if index == usize::MAX || best_score <= f64::EPSILON {
             break;
         }
-        centers.push(next);
+        centers.push(entries[index].rgb);
     }
 
-    centers
+    Ok(centers)
 }
 
 fn nearest_center(color: [f64; 3], centers: &[[f64; 3]]) -> usize {

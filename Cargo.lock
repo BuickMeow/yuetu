@@ -5089,6 +5089,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "midly",
+ "rayon",
  "thiserror 2.0.21",
 ]
 
