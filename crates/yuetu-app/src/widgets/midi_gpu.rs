@@ -1,11 +1,10 @@
 //! Instanced wgpu renderer for piano-roll notes.
 //!
-//! The instance buffer is rebuilt only when a new `ConversionResult` arrives.
-//! Pan/zoom changes only update a small uniform; note geometry stays on the
-//! GPU and is drawn in one instanced call.
+//! The instance buffer is written on every paint. Pan/zoom changes only update
+//! a small uniform; note geometry stays on the GPU and is drawn in one
+//! instanced call.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytemuck::{Pod, Zeroable};
 use eframe::egui::{self, PaintCallbackInfo};
@@ -13,8 +12,6 @@ use eframe::egui_wgpu::{CallbackResources, CallbackTrait, ScreenDescriptor};
 use eframe::wgpu;
 use eframe::wgpu::util::DeviceExt;
 use yuetu_core::{Color, ConversionResult};
-
-static NEXT_DATA_ID: AtomicU64 = AtomicU64::new(1);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -27,7 +24,6 @@ struct MidiNoteInstance {
 }
 
 pub struct MidiGpuData {
-    pub id: u64,
     instances: Vec<MidiNoteInstance>,
 }
 
@@ -65,10 +61,7 @@ impl MidiGpuData {
             });
         }
 
-        Self {
-            id: NEXT_DATA_ID.fetch_add(1, Ordering::Relaxed),
-            instances,
-        }
+        Self { instances }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -172,7 +165,6 @@ struct MidiGpuResources {
     uniform_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
-    uploaded_id: Option<u64>,
 }
 
 impl MidiGpuResources {
@@ -305,7 +297,6 @@ impl MidiGpuResources {
             uniform_buffer,
             instance_buffer,
             instance_capacity,
-            uploaded_id: None,
         }
     }
 
@@ -317,10 +308,6 @@ impl MidiGpuResources {
         uniform: &MidiUniform,
     ) {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(uniform));
-
-        if self.uploaded_id == Some(data.id) {
-            return;
-        }
 
         let required = std::mem::size_of_val(data.instances.as_slice()) as u64;
         if required > self.instance_capacity {
@@ -339,6 +326,5 @@ impl MidiGpuResources {
                 bytemuck::cast_slice(data.instances.as_slice()),
             );
         }
-        self.uploaded_id = Some(data.id);
     }
 }

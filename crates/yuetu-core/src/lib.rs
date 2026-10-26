@@ -33,9 +33,8 @@ pub mod rotate;
 
 pub use color::Color;
 pub use convert::{
-    ConversionConfig, ConversionResult, ConversionSeed, PaletteScope, StageTimings, convert,
-    convert_frames_with_palette_and_progress, convert_frames_with_progress,
-    convert_seeded_with_options, convert_seeded_with_progress, convert_with_progress,
+    ConversionConfig, ConversionResult, PaletteScope, StageTimings, convert,
+    convert_frames_with_progress, convert_with_options, convert_with_progress,
 };
 pub use error::{Error, Result};
 pub use image::{
@@ -52,4 +51,6 @@ pub use palette::Palette;
 pub use progress::{Progress, Stage};
 pub use quantize::{IndexedImage, TRANSPARENT_ID, quantize, quantize_with_progress};
 pub use resize::ResizeAlgorithm;
-pub use rotate::{normalize_degrees, rotate_image, rotated_dimensions};
+pub use rotate::{
+    normalize_degrees, rotate_image, rotated_dimensions, rotated_dimensions_f32, sample_bilinear,
+};

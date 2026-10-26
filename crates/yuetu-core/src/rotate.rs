@@ -27,25 +27,28 @@ pub fn normalize_degrees(degrees: f32) -> f32 {
 
 /// Dimensions of the expanded canvas after rotation, without rotating pixels.
 pub fn rotated_dimensions(width: u32, height: u32, degrees: f32) -> (u32, u32) {
+    let (width, height) = rotated_dimensions_f32(width as f32, height as f32, degrees);
+    (width.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32)
+}
+
+/// Continuous dimensions of the expanded canvas after rotation.
+pub fn rotated_dimensions_f32(width: f32, height: f32, degrees: f32) -> (f32, f32) {
     let angle = normalize_degrees(degrees);
     if angle == 0.0 || (angle - 180.0).abs() < EPSILON {
-        return (width.max(1), height.max(1));
+        return (width.max(1.0), height.max(1.0));
     }
     if (angle - 90.0).abs() < EPSILON || (angle + 90.0).abs() < EPSILON {
-        return (height.max(1), width.max(1));
+        return (height.max(1.0), width.max(1.0));
     }
 
     let radians = f64::from(angle).to_radians();
     let (sin, cos) = radians.sin_cos();
-    let source_width = f64::from(width.max(1));
-    let source_height = f64::from(height.max(1));
-    let output_width = (source_width * cos.abs() + source_height * sin.abs())
-        .ceil()
-        .max(1.0) as u32;
-    let output_height = (source_width * sin.abs() + source_height * cos.abs())
-        .ceil()
-        .max(1.0) as u32;
-    (output_width, output_height)
+    let source_width = f64::from(width.max(1.0));
+    let source_height = f64::from(height.max(1.0));
+    (
+        (source_width * cos.abs() + source_height * sin.abs()) as f32,
+        (source_width * sin.abs() + source_height * cos.abs()) as f32,
+    )
 }
 
 pub fn rotate_image(image: &RgbaImage, degrees: f32) -> Result<RgbaImage> {
@@ -154,7 +157,7 @@ fn rotate_arbitrary(image: &RgbaImage, angle: f32) -> Result<RgbaImage> {
 }
 
 /// Bilinear sample at continuous pixel-edge coordinates. Returns straight RGBA.
-fn sample_bilinear(image: &RgbaImage, x: f64, y: f64) -> [u8; 4] {
+pub fn sample_bilinear(image: &RgbaImage, x: f64, y: f64) -> [u8; 4] {
     let px = x - 0.5;
     let py = y - 0.5;
     let x0 = px.floor() as i64;

@@ -1,10 +1,10 @@
 //! Application state that outlives a single frame.
 
 use egui::{TextureFilter, TextureHandle, TextureOptions, TextureWrapMode};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use yuetu_core::resize::resize;
 use yuetu_core::{
     Color, ConversionConfig, ConversionResult, ImageSequence, IndexedImage, KeyMap, Palette,
@@ -28,65 +28,22 @@ const INTERACTION_MAX_SIDE: u32 = 1024;
 /// Rasterization width used by the existing pixel pipeline for SVG sources.
 /// Display rendering is independent and follows the viewport zoom.
 const VECTOR_RASTER_LONG_SIDE: u32 = 2048;
-/// Wait for zoom to settle before re-rasterizing the vector source. The old
-/// texture is reused (at the same aspect) while the gesture is active.
-const VECTOR_RENDER_DEBOUNCE: Duration = Duration::from_millis(80);
-/// Full-page texture used only while a new viewport crop is pending. Higher
-/// than the normal source preview keeps intermediate zoom frames sharper.
-const VECTOR_FALLBACK_SIDE: u32 = 4096;
 
-struct Thumbnail {
-    texture: TextureHandle,
-    size: egui::Vec2,
-}
-
-struct VectorViewCache {
-    key: VectorViewKey,
-    texture: TextureHandle,
-}
-
-struct VectorFallbackCache {
-    key: VectorFallbackKey,
-    texture: TextureHandle,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct VectorViewKey {
-    width: u32,
-    height: u32,
-    page: u32,
-    rotation_bits: u32,
-    content: [i32; 4],
-    viewport: [i32; 4],
-    ppp_bits: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct VectorFallbackKey {
-    page: u32,
-    rotation_bits: u32,
-    width: u32,
-    height: u32,
-}
-
-/// One texture draw for the source stage. Vector sources can cover the whole
-/// viewport with a cropped render instead of stretching a full-page texture.
+/// One texture draw for the source stage. Vector sources render exactly the
+/// visible viewport, so the texture can cover a cropped part of the page.
 pub struct VectorDraw {
     pub texture: egui::TextureId,
     pub rect: egui::Rect,
 }
 
 /// A live vector source. The raster fields on `SourceImage` remain the
-/// deterministic conversion image; this cache drives the source-stage display.
+/// deterministic conversion image; this type owns the current source-stage
+/// texture and the GPU renderer.
 pub struct VectorSource {
     document: VectorDocument,
     page: usize,
-    cache: RefCell<Option<VectorViewCache>>,
-    fallback: RefCell<Option<VectorFallbackCache>>,
-    pending: RefCell<Option<(VectorViewKey, Instant)>>,
+    texture: RefCell<Option<egui::TextureHandle>>,
     gpu: RefCell<Option<VectorGpu>>,
-    gpu_key: Cell<Option<VectorViewKey>>,
-    gpu_texture: Cell<Option<egui::TextureId>>,
 }
 
 impl VectorSource {
@@ -97,12 +54,8 @@ impl VectorSource {
         Self {
             document,
             page: 0,
-            cache: RefCell::new(None),
-            fallback: RefCell::new(None),
-            pending: RefCell::new(None),
+            texture: RefCell::new(None),
             gpu: RefCell::new(gpu_render_state.map(VectorGpu::new)),
-            gpu_key: Cell::new(None),
-            gpu_texture: Cell::new(None),
         }
     }
 
@@ -118,96 +71,19 @@ impl VectorSource {
         self.document.page_has_alpha()
     }
 
-    fn render_rotation_target(
-        &self,
-        width: u32,
-        height: u32,
-        rotation: f32,
-    ) -> Option<Arc<RgbaImage>> {
-        // Rotated EPS cannot use the GPU scene: the white paper path would
-        // antialias independently from the artwork and leave a white fringe.
-        // `render_page_rotated_to_size` renders the page first, then rotates
-        // the finished opaque raster with premultiplied alpha.
-        if !self.document.page_has_alpha()
-            && rotation == 0.0
-            && let Some(transform) = self
-                .document
-                .rotation_target_transform(self.page, width, height, rotation)
-            && let Some(image) = self.gpu.borrow_mut().as_mut().and_then(|gpu| {
-                gpu.render_image(&self.document, self.page, width, height, transform)
-            })
-        {
-            return Some(Arc::new(image));
-        }
+    fn page_size(&self) -> Option<(f32, f32)> {
+        self.document.page_size(self.page)
+    }
+
+    fn render_rotation_target(&self, width: u32, height: u32, rotation: f32) -> Option<RgbaImage> {
         self.document
             .render_page_rotated_to_size(self.page, width, height, rotation)
             .ok()
-            .map(Arc::new)
-    }
-
-    fn page_size(&self) -> Option<(f32, f32)> {
-        self.document.page_size(self.page)
     }
 
     fn set_page(&mut self, page: usize) {
         if page < self.document.page_count() {
             self.page = page;
-            *self.cache.borrow_mut() = None;
-            *self.fallback.borrow_mut() = None;
-            *self.pending.borrow_mut() = None;
-            self.gpu_key.set(None);
-            self.gpu_texture.set(None);
-        }
-    }
-
-    fn ensure_fallback(
-        &self,
-        ctx: &egui::Context,
-        display_size: (u32, u32),
-        rotation_deg: f32,
-        max_side: u32,
-    ) -> Option<egui::TextureId> {
-        let rotation = normalize_degrees(rotation_deg);
-        let (width, height) = fallback_dimensions(display_size, max_side);
-        if width == 0 || height == 0 {
-            return None;
-        }
-        let key = VectorFallbackKey {
-            page: self.page as u32,
-            rotation_bits: rotation.to_bits(),
-            width,
-            height,
-        };
-        if let Some(cache) = self.fallback.borrow().as_ref() {
-            if cache.key == key {
-                return Some(cache.texture.id());
-            }
-        }
-        let image = match self
-            .document
-            .render_page_rotated_to_fit(self.page, width, height, rotation)
-        {
-            Ok(image) => image,
-            Err(error) => {
-                tracing::warn!("failed to render vector fallback: {error}");
-                return None;
-            }
-        };
-        let color = egui::ColorImage::from_rgba_unmultiplied(
-            [image.width as usize, image.height as usize],
-            &image.pixels,
-        );
-        let options = vector_texture_options();
-        let mut fallback = self.fallback.borrow_mut();
-        if let Some(cache) = fallback.as_mut() {
-            cache.texture.set(color, options);
-            cache.key = key;
-            Some(cache.texture.id())
-        } else {
-            let texture = ctx.load_texture("yuetu.vector.fallback", color, options);
-            let id = texture.id();
-            *fallback = Some(VectorFallbackCache { key, texture });
-            Some(id)
         }
     }
 
@@ -216,7 +92,6 @@ impl VectorSource {
         ctx: &egui::Context,
         content: egui::Rect,
         viewport: egui::Rect,
-        display_size: (u32, u32),
         rotation_deg: f32,
     ) -> Option<VectorDraw> {
         if !content.is_positive() || !viewport.is_positive() {
@@ -227,63 +102,15 @@ impl VectorSource {
             .input(|input| input.max_texture_side)
             .clamp(1, MAX_TEXTURE_SIDE as usize) as u32;
         let rotation = normalize_degrees(rotation_deg);
-        let fallback = || self.ensure_fallback(ctx, display_size, rotation, max_side);
-        // stet only renders axis-aligned regions, and Vello's white paper path
-        // fringes when rotated. Rotated EPS therefore uses the full-page
-        // rotated raster instead of trying a viewport crop every frame.
-        if !self.document.supports_gpu_rotation() && rotation != 0.0 {
-            return Some(VectorDraw {
-                texture: fallback()?,
-                rect: content,
-            });
-        }
-        if !self.document.supports_view_render() {
-            return Some(VectorDraw {
-                texture: fallback()?,
-                rect: content,
-            });
-        }
         let page_size = self.page_size()?;
         let visible = content.intersect(viewport);
         if !visible.is_positive() {
-            return Some(VectorDraw {
-                texture: fallback()?,
-                rect: content,
-            });
+            return None;
         }
         let (width, height) = capped_texture_size(visible.size(), ppp, max_side);
         if width == 0 || height == 0 {
             return None;
         }
-        let key = VectorViewKey {
-            width,
-            height,
-            page: self.page as u32,
-            rotation_bits: rotation.to_bits(),
-            content: [
-                (content.left() * ppp).round() as i32,
-                (content.top() * ppp).round() as i32,
-                (content.right() * ppp).round() as i32,
-                (content.bottom() * ppp).round() as i32,
-            ],
-            viewport: [
-                (visible.left() * ppp).round() as i32,
-                (visible.top() * ppp).round() as i32,
-                (visible.right() * ppp).round() as i32,
-                (visible.bottom() * ppp).round() as i32,
-            ],
-            ppp_bits: ppp.to_bits(),
-        };
-        if let (Some(gpu_key), Some(texture)) = (self.gpu_key.get(), self.gpu_texture.get()) {
-            if gpu_key == key {
-                *self.pending.borrow_mut() = None;
-                return Some(VectorDraw {
-                    texture,
-                    rect: visible,
-                });
-            }
-        }
-
         let out_scale_x = width as f32 / (visible.width() * ppp).max(1e-6);
         let out_scale_y = height as f32 / (visible.height() * ppp).max(1e-6);
         let transform = vector_view_transform(
@@ -295,57 +122,17 @@ impl VectorSource {
             out_scale_x,
             out_scale_y,
         );
-        // GPU path rendering is fast enough to run during a zoom or pan. Doing
-        // it before the fallback debounce keeps SVG sources sharp for the whole
-        // gesture instead of showing an upscaled page raster for 80 ms.
-        let gpu_texture = self
+
+        if let Some(texture) = self
             .gpu
             .borrow_mut()
             .as_mut()
-            .and_then(|gpu| gpu.render(&self.document, self.page, width, height, transform));
-        if let Some(texture) = gpu_texture {
-            *self.pending.borrow_mut() = None;
-            self.gpu_key.set(Some(key));
-            self.gpu_texture.set(Some(texture));
+            .and_then(|gpu| gpu.render(&self.document, self.page, width, height, transform))
+        {
             return Some(VectorDraw {
                 texture,
                 rect: visible,
             });
-        }
-
-        if let Some(cache) = self.cache.borrow().as_ref() {
-            if cache.key == key {
-                *self.pending.borrow_mut() = None;
-                return Some(VectorDraw {
-                    texture: cache.texture.id(),
-                    rect: visible,
-                });
-            }
-        }
-
-        let now = Instant::now();
-        {
-            let mut pending = self.pending.borrow_mut();
-            match pending.as_ref() {
-                Some((pending_key, since)) if *pending_key == key => {
-                    let elapsed = now.saturating_duration_since(*since);
-                    if elapsed < VECTOR_RENDER_DEBOUNCE {
-                        ctx.request_repaint_after(VECTOR_RENDER_DEBOUNCE - elapsed);
-                        return Some(VectorDraw {
-                            texture: fallback()?,
-                            rect: content,
-                        });
-                    }
-                }
-                _ => {
-                    *pending = Some((key, now));
-                    ctx.request_repaint_after(VECTOR_RENDER_DEBOUNCE);
-                    return Some(VectorDraw {
-                        texture: fallback()?,
-                        rect: content,
-                    });
-                }
-            }
         }
 
         let image = match self
@@ -355,28 +142,22 @@ impl VectorSource {
             Ok(image) => image,
             Err(error) => {
                 tracing::warn!("failed to render vector viewport: {error}");
-                *self.pending.borrow_mut() = None;
-                return Some(VectorDraw {
-                    texture: fallback()?,
-                    rect: content,
-                });
+                return None;
             }
         };
-        *self.pending.borrow_mut() = None;
         let color = egui::ColorImage::from_rgba_unmultiplied(
             [image.width as usize, image.height as usize],
             &image.pixels,
         );
         let options = vector_texture_options();
-        let mut cache = self.cache.borrow_mut();
-        let id = if let Some(cache) = cache.as_mut() {
-            cache.texture.set(color, options);
-            cache.key = key;
-            cache.texture.id()
+        let mut texture = self.texture.borrow_mut();
+        let id = if let Some(texture) = texture.as_mut() {
+            texture.set(color, options);
+            texture.id()
         } else {
-            let texture = ctx.load_texture("yuetu.vector.view", color, options);
-            let id = texture.id();
-            *cache = Some(VectorViewCache { key, texture });
+            let handle = ctx.load_texture("yuetu.vector.view", color, options);
+            let id = handle.id();
+            *texture = Some(handle);
             id
         };
         Some(VectorDraw {
@@ -409,7 +190,7 @@ pub struct SourceImage {
     /// A live vector rotation updated only the cheap geometry fields. The
     /// display/interaction rasters are rebuilt once the drag ends.
     rotation_preview_dirty: bool,
-    thumbnails: Vec<Option<Thumbnail>>,
+    thumbnail_handles: RefCell<Vec<TextureHandle>>,
     pub texture: TextureHandle,
     texture_dirty: bool,
 }
@@ -445,7 +226,7 @@ impl SourceImage {
         let document = VectorDocument::load(&path)
             .map_err(|error| yuetu_core::Error::InvalidImage(error.to_string()))?;
         let raster = document
-            .render_to_long_side(VECTOR_RASTER_LONG_SIDE)
+            .render_page_to_long_side(0, VECTOR_RASTER_LONG_SIDE)
             .map_err(|error| yuetu_core::Error::InvalidImage(error.to_string()))?;
         let frames = vec![Arc::new(raster)];
         Self::from_sequence(
@@ -478,7 +259,6 @@ impl SourceImage {
             .and_then(|name| name.to_str())
             .unwrap_or("image")
             .to_owned();
-        let thumbnail_count = frames.len();
 
         Ok(Self {
             path,
@@ -495,9 +275,7 @@ impl SourceImage {
             frame_index: 0,
             rotation_deg: 0.0,
             rotation_preview_dirty: false,
-            thumbnails: std::iter::repeat_with(|| None)
-                .take(thumbnail_count)
-                .collect(),
+            thumbnail_handles: RefCell::new(Vec::new()),
             texture,
             texture_dirty: false,
         })
@@ -605,44 +383,43 @@ impl SourceImage {
             .unwrap_or(Color::TRANSPARENT)
     }
 
-    /// Lazily build a small display texture for the frame strip. Only visible
-    /// cells ask for thumbnails, so a 1000-frame GIF does not upload 1000
-    /// textures up front.
+    /// Build a small display texture for one frame-strip cell. The texture is
+    /// generated every time the cell is painted; the handle is kept only for
+    /// the current frame so egui can sample it while painting.
     pub fn thumbnail(
-        &mut self,
+        &self,
         ctx: &egui::Context,
         index: usize,
     ) -> Option<(egui::TextureId, egui::Vec2)> {
         let index = index.min(self.frames.len().checked_sub(1)?);
-        if self.thumbnails[index].is_none() {
-            let frame = self.frames.get(index)?;
-            let scale = (THUMBNAIL_MAX_SIDE as f32 / frame.width.max(1) as f32)
-                .min(THUMBNAIL_MAX_SIDE as f32 / frame.height.max(1) as f32)
-                .min(1.0);
-            let width = (frame.width as f32 * scale).round().max(1.0) as u32;
-            let height = (frame.height as f32 * scale).round().max(1.0) as u32;
-            let small = resize(frame, width, height, ResizeAlgorithm::Nearest).ok()?;
-            let rotated = if normalize_degrees(self.rotation_deg) == 0.0 {
-                small
-            } else {
-                rotate_image(&small, self.rotation_deg).ok()?
-            };
-            let name = format!(
-                "thumb:{}:{}:{:.2}",
-                self.path.display(),
-                index,
-                self.rotation_deg
-            );
-            let texture = upload_texture(ctx, &name, &rotated).ok()?;
-            self.thumbnails[index] = Some(Thumbnail {
-                texture,
-                size: egui::vec2(rotated.width as f32, rotated.height as f32),
-            });
-        }
+        let frame = self.frames.get(index)?;
+        let scale = (THUMBNAIL_MAX_SIDE as f32 / frame.width.max(1) as f32)
+            .min(THUMBNAIL_MAX_SIDE as f32 / frame.height.max(1) as f32)
+            .min(1.0);
+        let width = (frame.width as f32 * scale).round().max(1.0) as u32;
+        let height = (frame.height as f32 * scale).round().max(1.0) as u32;
+        let small = resize(frame, width, height, ResizeAlgorithm::Nearest).ok()?;
+        let rotated = if normalize_degrees(self.rotation_deg) == 0.0 {
+            small
+        } else {
+            rotate_image(&small, self.rotation_deg).ok()?
+        };
+        let name = format!(
+            "thumb:{}:{}:{:.2}",
+            self.path.display(),
+            index,
+            self.rotation_deg
+        );
+        let texture = upload_texture(ctx, &name, &rotated).ok()?;
+        let size = egui::vec2(rotated.width as f32, rotated.height as f32);
+        let id = texture.id();
+        self.thumbnail_handles.borrow_mut().push(texture);
+        Some((id, size))
+    }
 
-        self.thumbnails[index]
-            .as_ref()
-            .map(|thumbnail| (thumbnail.texture.id(), thumbnail.size))
+    /// Drop the previous frame's thumbnail textures before the strip paints.
+    pub fn begin_thumbnails(&self) {
+        self.thumbnail_handles.borrow_mut().clear();
     }
 
     pub fn select_frame(
@@ -705,9 +482,6 @@ impl SourceImage {
             // what made live rotation feel frozen.
             self.display_size = rotated_dimensions(self.image.width, self.image.height, degrees);
             self.rotation_preview_dirty = true;
-            for thumbnail in &mut self.thumbnails {
-                *thumbnail = None;
-            }
             return Ok(true);
         }
 
@@ -728,7 +502,7 @@ impl SourceImage {
         let image = vector
             .render_rotation_target(target.0, target.1, degrees)
             .ok_or_else(|| yuetu_core::Error::InvalidImage("无法生成矢量旋转预览".into()))?;
-        self.interaction_image = image;
+        self.interaction_image = Arc::new(image);
         Ok(())
     }
 
@@ -767,10 +541,6 @@ impl SourceImage {
         self.display_size = display_size;
         self.interaction_image = interaction_image;
         self.rotation_preview_dirty = false;
-        // Frame-strip thumbnails are cached in the old orientation.
-        for thumbnail in &mut self.thumbnails {
-            *thumbnail = None;
-        }
         Ok(())
     }
 
@@ -817,23 +587,6 @@ fn vector_texture_options() -> TextureOptions {
         minification: TextureFilter::Linear,
         wrap_mode: TextureWrapMode::ClampToEdge,
         mipmap_mode: None,
-    }
-}
-
-fn fallback_dimensions(display_size: (u32, u32), max_side: u32) -> (u32, u32) {
-    let max_side = max_side.min(VECTOR_FALLBACK_SIDE).max(1);
-    let width = display_size.0.max(1);
-    let height = display_size.1.max(1);
-    if width >= height {
-        (
-            max_side,
-            ((max_side as f32 * height as f32 / width as f32).round() as u32).max(1),
-        )
-    } else {
-        (
-            ((max_side as f32 * width as f32 / height as f32).round() as u32).max(1),
-            max_side,
-        )
     }
 }
 
@@ -1160,7 +913,7 @@ impl Preview {
     /// key-map or palette stage. It uses the same resize algorithm as the
     /// final conversion so releasing the mouse does not change the picture.
     /// Notes and MIDI instances stay untouched until the final conversion.
-    /// Generate notes on demand from the cached indexed image. Used when a
+    /// Generate notes on demand from the current indexed image. Used when a
     /// preview was produced while the MIDI stage was not visible.
     pub fn ensure_notes(&mut self, config: &ConversionConfig) -> yuetu_core::Result<()> {
         if self.result.notes_generated {
@@ -1391,7 +1144,7 @@ mod tests {
             frame_index: 0,
             rotation_deg: 0.0,
             rotation_preview_dirty: false,
-            thumbnails: vec![None, None],
+            thumbnail_handles: RefCell::new(Vec::new()),
             texture,
             texture_dirty: false,
         };

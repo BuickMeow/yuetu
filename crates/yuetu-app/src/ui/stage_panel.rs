@@ -53,7 +53,6 @@ pub fn show(
                                 &ctx,
                                 interaction.content_rect,
                                 interaction.viewport,
-                                source.display_size,
                                 rotation,
                             )
                             .map(|draw| stage_image::TextureDraw {

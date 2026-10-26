@@ -10,8 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use yuetu_core::{
-    ConversionConfig, ConversionResult, ConversionSeed, Error, Palette, RgbaImage, Stage,
-    convert_seeded_with_options,
+    ConversionConfig, ConversionResult, Error, RgbaImage, Stage, convert_with_options,
 };
 
 /// UI-facing progress snapshot.
@@ -117,8 +116,6 @@ impl JobRunner {
         image: Arc<RgbaImage>,
         palette_frames: Vec<Arc<RgbaImage>>,
         delays_ms: Vec<u32>,
-        shared_palette: Option<Palette>,
-        seed: Option<ConversionSeed>,
         config: ConversionConfig,
         generate_notes: bool,
     ) -> Result<u64, String> {
@@ -142,12 +139,10 @@ impl JobRunner {
                 };
 
                 let frame_refs: Vec<&RgbaImage> = palette_frames.iter().map(Arc::as_ref).collect();
-                let event = match convert_seeded_with_options(
+                let event = match convert_with_options(
                     image.as_ref(),
                     &frame_refs,
                     &delays_ms,
-                    shared_palette.as_ref(),
-                    seed.as_ref(),
                     &config,
                     generate_notes,
                     Some(&progress),

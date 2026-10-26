@@ -123,6 +123,7 @@ fn show_thumbnails(
     selected: usize,
     scroll_to_selected: bool,
 ) -> Output {
+    source.begin_thumbnails();
     let frame_count = source.frame_count();
     let total_width = frame_count as f32 * THUMBNAIL_STRIDE - THUMBNAIL_CELL_GAP;
     let scroll_bar_visibility = scroll_bar_visibility(ui, total_width);

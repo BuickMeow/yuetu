@@ -8,7 +8,7 @@ use std::path::Path;
 
 use resvg::tiny_skia;
 use thiserror::Error;
-use yuetu_core::{ResizeAlgorithm, RgbaImage, resize::resize, rotate::rotate_image};
+use yuetu_core::{ResizeAlgorithm, RgbaImage, resize::resize};
 
 mod gpu;
 mod gpu_eps;
@@ -89,6 +89,43 @@ impl ViewTransform {
             f64::from(self.f),
         ])
     }
+
+    fn inverse(self) -> Option<Self> {
+        let a = f64::from(self.a);
+        let b = f64::from(self.b);
+        let c = f64::from(self.c);
+        let d = f64::from(self.d);
+        let determinant = a * d - b * c;
+        if determinant.abs() <= f64::EPSILON {
+            return None;
+        }
+        let inv = 1.0 / determinant;
+        Some(Self {
+            a: (d * inv) as f32,
+            b: (-b * inv) as f32,
+            c: (-c * inv) as f32,
+            d: (a * inv) as f32,
+            e: ((c * f64::from(self.f) - d * f64::from(self.e)) * inv) as f32,
+            f: ((b * f64::from(self.e) - a * f64::from(self.f)) * inv) as f32,
+        })
+    }
+
+    fn apply(self, x: f64, y: f64) -> (f64, f64) {
+        (
+            f64::from(self.a) * x + f64::from(self.c) * y + f64::from(self.e),
+            f64::from(self.b) * x + f64::from(self.d) * y + f64::from(self.f),
+        )
+    }
+
+    fn is_axis_aligned(self) -> bool {
+        self.b == 0.0 && self.c == 0.0 && self.a > 0.0 && self.d > 0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageFit {
+    Contain,
+    Stretch,
 }
 
 impl VectorDocument {
@@ -103,11 +140,10 @@ impl VectorDocument {
     }
 
     pub fn from_bytes(bytes: Vec<u8>, extension: &str) -> Result<Self, VectorError> {
-        let trimmed = bytes
+        let trimmed = &bytes[bytes
             .iter()
-            .copied()
-            .skip_while(u8::is_ascii_whitespace)
-            .collect::<Vec<_>>();
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(bytes.len())..];
         if trimmed.starts_with(b"%PDF-") || find_header(&bytes, b"%PDF-", 1024) {
             let pdf = hayro::hayro_syntax::Pdf::new(bytes)
                 .map_err(|error| VectorError::Parse(format!("{error:?}")))?;
@@ -192,27 +228,12 @@ impl VectorDocument {
         !matches!(self.backend, Backend::Eps(_))
     }
 
-    /// Whether a rotated view can use the Vello scene builder. Opaque EPS
-    /// pages paint white paper as a second path under the artwork; rotating
-    /// that scene makes the paper and artwork edges antialias independently
-    /// and leaks white into the boundary pixels. Transparent pages have no
-    /// paper path, so their rotated scenes are safe.
-    pub fn supports_gpu_rotation(&self) -> bool {
-        self.page_has_alpha()
-    }
-
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
 
     pub fn page_size(&self, page: usize) -> Option<(f32, f32)> {
         self.pages.get(page).map(|page| (page.width, page.height))
-    }
-
-    /// Whether the backend can render an arbitrary cropped view instead of a
-    /// full page. EPS currently uses the full-page fallback.
-    pub fn supports_view_render(&self) -> bool {
-        true
     }
 
     /// Render the page using a page-user-unit -> output-pixel transform. Only
@@ -230,6 +251,9 @@ impl VectorDocument {
         }
         match &self.backend {
             Backend::Svg(tree) => {
+                if page != 0 {
+                    return Err(VectorError::InvalidPage);
+                }
                 let mut pixmap =
                     tiny_skia::Pixmap::new(width, height).ok_or(VectorError::InvalidSize)?;
                 resvg::render(tree, transform.tiny_skia(), &mut pixmap.as_mut());
@@ -277,11 +301,6 @@ impl VectorDocument {
         }
     }
 
-    /// Render the first page into a raster with the requested long side.
-    pub fn render_to_long_side(&self, long_side: u32) -> Result<RgbaImage, VectorError> {
-        self.render_page_to_long_side(0, long_side)
-    }
-
     pub fn render_page_to_long_side(
         &self,
         page: usize,
@@ -297,54 +316,9 @@ impl VectorDocument {
         self.render_page_exact(page, width, height)
     }
 
-    /// Render the first page rotated clockwise into a fitted RGBA raster.
-    pub fn render_rotated_to_fit(
-        &self,
-        width: u32,
-        height: u32,
-        degrees: f32,
-    ) -> Result<RgbaImage, VectorError> {
-        self.render_page_rotated_to_fit(0, width, height, degrees)
-    }
-
-    /// Transform mapping a rotated page canvas into an exact target size,
-    /// stretching it the same way `resize` does in the conversion pipeline.
-    pub fn rotation_target_transform(
-        &self,
-        page: usize,
-        width: u32,
-        height: u32,
-        degrees: f32,
-    ) -> Option<ViewTransform> {
-        let (page_w, page_h) = self.page_size(page)?;
-        if page_w <= 0.0 || page_h <= 0.0 || width == 0 || height == 0 {
-            return None;
-        }
-        let angle = normalize_degrees(degrees);
-        let (rotated_w, rotated_h) = rotated_page_size(page_w, page_h, angle);
-        if rotated_w <= 0.0 || rotated_h <= 0.0 {
-            return None;
-        }
-        let sx = width as f32 / rotated_w;
-        let sy = height as f32 / rotated_h;
-        let radians = angle.to_radians();
-        let (sin, cos) = radians.sin_cos();
-        let ex = rotated_w * 0.5 - cos * page_w * 0.5 + sin * page_h * 0.5;
-        let ey = rotated_h * 0.5 - sin * page_w * 0.5 - cos * page_h * 0.5;
-        Some(ViewTransform {
-            a: sx * cos,
-            b: sy * sin,
-            c: -sx * sin,
-            d: sy * cos,
-            e: sx * ex,
-            f: sy * ey,
-        })
-    }
-
     /// Render a page rotated clockwise at an exact target size. The rotated
     /// page canvas is stretched to fill the target, matching the conversion
-    /// resize used by the key-map and palette previews. This avoids building a
-    /// full-resolution intermediate raster just to downscale it later.
+    /// resize used by the key-map and palette previews.
     pub fn render_page_rotated_to_size(
         &self,
         page: usize,
@@ -352,43 +326,10 @@ impl VectorDocument {
         height: u32,
         degrees: f32,
     ) -> Result<RgbaImage, VectorError> {
-        let angle = normalize_degrees(degrees);
         let transform = self
-            .rotation_target_transform(page, width, height, angle)
+            .rotation_transform(page, width, height, degrees, PageFit::Stretch)
             .ok_or(VectorError::InvalidSize)?;
-        if self.supports_view_render() && !matches!(&self.backend, Backend::Eps(_)) {
-            return self.render_page_view(page, width, height, transform);
-        }
-
-        // stet's CPU region renderer cannot rotate a viewport. Render a tight
-        // rotated page and resample it into the target for the preview.
-        let tight = self.render_page_rotated_tight(page, width.max(height), angle)?;
-        resize(&tight, width, height, ResizeAlgorithm::Area)
-            .map_err(|error| VectorError::Parse(error.to_string()))
-    }
-
-    /// Render a page rotated clockwise into a tight raster whose long side is
-    /// at most `long_side`.
-    pub fn render_page_rotated_tight(
-        &self,
-        page: usize,
-        long_side: u32,
-        degrees: f32,
-    ) -> Result<RgbaImage, VectorError> {
-        let (page_w, page_h) = self.page_size(page).ok_or(VectorError::InvalidPage)?;
-        if page_w <= 0.0 || page_h <= 0.0 || long_side == 0 {
-            return Err(VectorError::InvalidSize);
-        }
-        let angle = normalize_degrees(degrees);
-        let (rotated_w, rotated_h) = rotated_page_size(page_w, page_h, angle);
-        let scale = long_side as f32 / rotated_w.max(rotated_h);
-        let base_width = (page_w * scale).round().max(1.0) as u32;
-        let base_height = (page_h * scale).round().max(1.0) as u32;
-        let base = self.render_page_exact(page, base_width, base_height)?;
-        if angle.abs() < 1e-4 {
-            return Ok(base);
-        }
-        rotate_image(&base, angle).map_err(|error| VectorError::Parse(error.to_string()))
+        self.render_page_view(page, width, height, transform)
     }
 
     /// Render a page rotated clockwise into a fitted RGBA raster.
@@ -399,22 +340,58 @@ impl VectorDocument {
         height: u32,
         degrees: f32,
     ) -> Result<RgbaImage, VectorError> {
-        let (page_w, page_h) = self.page_size(page).ok_or(VectorError::InvalidPage)?;
+        let transform = self
+            .rotation_transform(page, width, height, degrees, PageFit::Contain)
+            .ok_or(VectorError::InvalidSize)?;
+        self.render_page_view(page, width, height, transform)
+    }
+
+    fn rotation_transform(
+        &self,
+        page: usize,
+        width: u32,
+        height: u32,
+        degrees: f32,
+        fit: PageFit,
+    ) -> Option<ViewTransform> {
+        let (page_w, page_h) = self.page_size(page)?;
         if page_w <= 0.0 || page_h <= 0.0 || width == 0 || height == 0 {
-            return Err(VectorError::InvalidSize);
+            return None;
         }
-        let angle = normalize_degrees(degrees);
-        let (rotated_w, rotated_h) = rotated_page_size(page_w, page_h, angle);
-        let scale = (width as f32 / rotated_w).min(height as f32 / rotated_h);
-        let base_width = (page_w * scale).round().max(1.0) as u32;
-        let base_height = (page_h * scale).round().max(1.0) as u32;
-        let base = self.render_page_exact(page, base_width, base_height)?;
-        let rotated = if angle.abs() < 1e-4 {
-            base
-        } else {
-            rotate_image(&base, angle).map_err(|error| VectorError::Parse(error.to_string()))?
+        let angle = yuetu_core::normalize_degrees(degrees);
+        let (rotated_w, rotated_h) = yuetu_core::rotated_dimensions_f32(page_w, page_h, angle);
+        if rotated_w <= 0.0 || rotated_h <= 0.0 {
+            return None;
+        }
+        let (sx, sy, offset_x, offset_y) = match fit {
+            PageFit::Contain => {
+                let scale = (width as f32 / rotated_w).min(height as f32 / rotated_h);
+                (
+                    scale,
+                    scale,
+                    (width as f32 - rotated_w * scale) * 0.5,
+                    (height as f32 - rotated_h * scale) * 0.5,
+                )
+            }
+            PageFit::Stretch => (
+                width as f32 / rotated_w,
+                height as f32 / rotated_h,
+                0.0,
+                0.0,
+            ),
         };
-        Ok(center_into(rotated, width, height))
+        let radians = angle.to_radians();
+        let (sin, cos) = radians.sin_cos();
+        let ex = rotated_w * 0.5 - cos * page_w * 0.5 + sin * page_h * 0.5;
+        let ey = rotated_h * 0.5 - sin * page_w * 0.5 - cos * page_h * 0.5;
+        Some(ViewTransform {
+            a: sx * cos,
+            b: sy * sin,
+            c: -sx * sin,
+            d: sy * cos,
+            e: sx * ex + offset_x,
+            f: sy * ey + offset_y,
+        })
     }
 
     /// Render an exact-aspect page into the requested raster dimensions.
@@ -429,6 +406,9 @@ impl VectorDocument {
         }
         match &self.backend {
             Backend::Svg(tree) => {
+                if page != 0 {
+                    return Err(VectorError::InvalidPage);
+                }
                 let size = tree.size();
                 if size.width() <= 0.0 || size.height() <= 0.0 {
                     return Err(VectorError::InvalidSize);
@@ -479,7 +459,7 @@ fn render_pdf_page(
     );
     let mut image = vello_pixmap_to_rgba(&pixmap);
     if image.width != width || image.height != height {
-        image = center_into_resized(image, width, height);
+        image = center_into_resized(image, width, height)?;
     }
     Ok(image)
 }
@@ -536,22 +516,15 @@ fn render_eps_exact(
     if page.width == 0 || page.height == 0 {
         return Err(VectorError::InvalidSize);
     }
-    let prepared = stet::prepare_display_list(&page.display_list);
-    let rgba = stet::render_region_prepared(
-        &page.display_list,
-        &prepared,
+    render_eps_region(
+        page,
         0.0,
         0.0,
         page.width as f64,
         page.height as f64,
         width,
         height,
-        72.0,
-        None,
-        None,
-        false,
-    );
-    RgbaImage::from_rgba(width, height, rgba).map_err(|error| VectorError::Parse(error.to_string()))
+    )
 }
 
 fn render_eps_view(
@@ -562,27 +535,48 @@ fn render_eps_view(
     transform: ViewTransform,
 ) -> Result<RgbaImage, VectorError> {
     let page = eps.pages.get(page).ok_or(VectorError::InvalidPage)?;
-    // The stet region renderer works on axis-aligned regions. Rotated
-    // PostScript pages fall back to the full-page texture path.
-    if transform.b.abs() > 1e-4
-        || transform.c.abs() > 1e-4
-        || transform.a <= 0.0
-        || transform.d <= 0.0
-    {
-        return Err(VectorError::Parse("EPS 旋转视口暂不支持".into()));
+    if transform.is_axis_aligned() {
+        let vp_x = (0.0 - transform.e) / transform.a;
+        let vp_y = (0.0 - transform.f) / transform.d;
+        let vp_w = width as f32 / transform.a;
+        let vp_h = height as f32 / transform.d;
+        let mut image = render_eps_region(
+            page,
+            f64::from(vp_x),
+            f64::from(vp_y),
+            f64::from(vp_w),
+            f64::from(vp_h),
+            width,
+            height,
+        )?;
+        unmatte_eps_page(
+            &mut image,
+            f64::from(page.width),
+            f64::from(page.height),
+            transform,
+        );
+        return Ok(image);
     }
-    let vp_x = (0.0 - transform.e) / transform.a;
-    let vp_y = (0.0 - transform.f) / transform.d;
-    let vp_w = width as f32 / transform.a;
-    let vp_h = height as f32 / transform.d;
+    render_eps_rotated_view(page, width, height, transform)
+}
+
+fn render_eps_region(
+    page: &stet::DisplayListPage,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    width: u32,
+    height: u32,
+) -> Result<RgbaImage, VectorError> {
     let prepared = stet::prepare_display_list(&page.display_list);
     let rgba = stet::render_region_prepared(
         &page.display_list,
         &prepared,
-        f64::from(vp_x),
-        f64::from(vp_y),
-        f64::from(vp_w),
-        f64::from(vp_h),
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
         width,
         height,
         72.0,
@@ -590,15 +584,80 @@ fn render_eps_view(
         None,
         false,
     );
-    let mut image = RgbaImage::from_rgba(width, height, rgba)
-        .map_err(|error| VectorError::Parse(error.to_string()))?;
+    RgbaImage::from_rgba(width, height, rgba).map_err(|error| VectorError::Parse(error.to_string()))
+}
+
+fn render_eps_rotated_view(
+    page: &stet::DisplayListPage,
+    width: u32,
+    height: u32,
+    transform: ViewTransform,
+) -> Result<RgbaImage, VectorError> {
+    let inverse = transform
+        .inverse()
+        .ok_or_else(|| VectorError::Parse("EPS 视口变换不可逆".into()))?;
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (x, y) in [
+        (0.0, 0.0),
+        (f64::from(width), 0.0),
+        (0.0, f64::from(height)),
+        (f64::from(width), f64::from(height)),
+    ] {
+        let (px, py) = inverse.apply(x, y);
+        min_x = min_x.min(px);
+        min_y = min_y.min(py);
+        max_x = max_x.max(px);
+        max_y = max_y.max(py);
+    }
+    let region_w = max_x - min_x;
+    let region_h = max_y - min_y;
+    if !region_w.is_finite() || !region_h.is_finite() || region_w <= 0.0 || region_h <= 0.0 {
+        return Err(VectorError::InvalidSize);
+    }
+    let density_x = f64::from(transform.a).hypot(f64::from(transform.b));
+    let density_y = f64::from(transform.c).hypot(f64::from(transform.d));
+    if !density_x.is_finite() || !density_y.is_finite() || density_x <= 0.0 || density_y <= 0.0 {
+        return Err(VectorError::InvalidSize);
+    }
+    let raster_w = (region_w * density_x).ceil().max(1.0) as u32;
+    let raster_h = (region_h * density_y).ceil().max(1.0) as u32;
+    if raster_w > u32::from(u16::MAX) || raster_h > u32::from(u16::MAX) {
+        return Err(VectorError::InvalidSize);
+    }
+    let scale_x = f64::from(raster_w) / region_w;
+    let scale_y = f64::from(raster_h) / region_h;
+    let mut raster = render_eps_region(page, min_x, min_y, region_w, region_h, raster_w, raster_h)?;
     unmatte_eps_page(
-        &mut image,
+        &mut raster,
         f64::from(page.width),
         f64::from(page.height),
-        transform,
+        ViewTransform {
+            a: scale_x as f32,
+            b: 0.0,
+            c: 0.0,
+            d: scale_y as f32,
+            e: (-min_x * scale_x) as f32,
+            f: (-min_y * scale_y) as f32,
+        },
     );
-    Ok(image)
+
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        for x in 0..width {
+            let (px, py) = inverse.apply(f64::from(x) + 0.5, f64::from(y) + 0.5);
+            let color = yuetu_core::sample_bilinear(
+                &raster,
+                (px - min_x) * scale_x,
+                (py - min_y) * scale_y,
+            );
+            pixels.extend_from_slice(&color);
+        }
+    }
+    RgbaImage::from_rgba(width, height, pixels)
+        .map_err(|error| VectorError::Parse(error.to_string()))
 }
 
 /// stet's region renderer always composites the page onto white paper, even
@@ -738,34 +797,17 @@ fn center_into(image: RgbaImage, width: u32, height: u32) -> RgbaImage {
     out
 }
 
-fn center_into_resized(image: RgbaImage, width: u32, height: u32) -> RgbaImage {
+fn center_into_resized(
+    image: RgbaImage,
+    width: u32,
+    height: u32,
+) -> Result<RgbaImage, VectorError> {
     let scale = (width as f32 / image.width as f32).min(height as f32 / image.height as f32);
     let resized_w = (image.width as f32 * scale).round().max(1.0) as u32;
     let resized_h = (image.height as f32 * scale).round().max(1.0) as u32;
-    let resized = resize(&image, resized_w, resized_h, ResizeAlgorithm::Area).unwrap_or(image);
-    center_into(resized, width, height)
-}
-
-fn normalize_degrees(degrees: f32) -> f32 {
-    if !degrees.is_finite() {
-        return 0.0;
-    }
-    let mut angle = degrees % 360.0;
-    if angle <= -180.0 {
-        angle += 360.0;
-    } else if angle > 180.0 {
-        angle -= 360.0;
-    }
-    angle
-}
-
-fn rotated_page_size(width: f32, height: f32, degrees: f32) -> (f32, f32) {
-    let radians = degrees.to_radians();
-    let (sin, cos) = radians.sin_cos();
-    (
-        width * cos.abs() + height * sin.abs(),
-        width * sin.abs() + height * cos.abs(),
-    )
+    let resized = resize(&image, resized_w, resized_h, ResizeAlgorithm::Area)
+        .map_err(|error| VectorError::Parse(error.to_string()))?;
+    Ok(center_into(resized, width, height))
 }
 
 fn find_header(bytes: &[u8], needle: &[u8], limit: usize) -> bool {
@@ -996,11 +1038,43 @@ mod tests {
     }
 
     #[test]
-    fn eps_does_not_use_the_gpu_scene_when_rotated() {
-        assert!(!fixture("vector.eps").supports_gpu_rotation());
-        assert!(!fixture("vector-eps.ai").supports_gpu_rotation());
-        assert!(fixture("vector.svg").supports_gpu_rotation());
-        assert!(fixture("vector.pdf").supports_gpu_rotation());
+    fn eps_view_render_rotates_without_a_white_fringe() {
+        let document = fixture("vector.eps");
+        let image = document
+            .render_page_view(
+                0,
+                300,
+                400,
+                ViewTransform {
+                    a: 0.0,
+                    b: 1.0,
+                    c: -1.0,
+                    d: 0.0,
+                    e: 300.0,
+                    f: 0.0,
+                },
+            )
+            .unwrap();
+        // The dark page background reaches every edge. A rotated page corner
+        // may be partially covered, but its color must stay dark rather than
+        // being matted onto white paper.
+        for (x, y) in [(0, 0), (299, 0), (0, 399), (299, 399)] {
+            let pixel = image.pixel(x, y).unwrap();
+            assert!(pixel.r < 40 && pixel.g < 40 && pixel.b < 40, "{pixel:?}");
+            assert!(pixel.a > 0, "{pixel:?}");
+        }
+        let center = image.pixel(150, 200).unwrap();
+        assert_eq!(center.a, 255);
+    }
+
+    #[test]
+    fn eps_rotated_target_render_fills_the_exact_preview_size() {
+        let document = fixture("vector.eps");
+        let image = document
+            .render_page_rotated_to_size(0, 128, 1536, 31.0)
+            .unwrap();
+        assert_eq!((image.width, image.height), (128, 1536));
+        assert!(image.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
     }
 
     #[test]

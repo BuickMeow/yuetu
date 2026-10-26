@@ -6,10 +6,7 @@
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
-use yuetu_core::{
-    Color, ConversionConfig, ConversionSeed, RgbaImage, convert_frames_with_progress,
-    convert_seeded_with_progress,
-};
+use yuetu_core::{Color, ConversionConfig, RgbaImage, convert_frames_with_progress};
 
 fn main() {
     let frame_count = 30usize;
@@ -47,32 +44,21 @@ fn main() {
     );
     println!("wall: {:.2} ms", started.elapsed().as_secs_f64() * 1000.0);
 
-    let seed = ConversionSeed {
-        keymap: Some(first.keymap.clone()),
-        palette: Some(first.palette.clone()),
-        resized: Some(first.resized_image.clone()),
-        resized_size: Some(first.resized_size),
-        source_size: Some(first.source_size),
-        time_axis: Some(first.time_axis),
-        indexed: Some(first.indexed_image.clone()),
-    };
     let notes_config = ConversionConfig {
         max_note_length: 8,
         ..config
     };
-    let second = convert_seeded_with_progress(
+    let second = convert_frames_with_progress(
         &frames[0],
-        &[],
-        &[],
-        None,
-        Some(&seed),
+        &frame_refs,
+        &delays,
         &notes_config,
         None,
         &cancel,
     )
     .unwrap();
     println!(
-        "notes-only seed: total {:.2} ms | palette {:.2} | transform {:.2} | quantize {:.2} | notes {:.2}",
+        "full again: total {:.2} ms | palette {:.2} | transform {:.2} | quantize {:.2} | notes {:.2}",
         second.timings.total_ms,
         second.timings.palette_ms,
         second.timings.transform_ms,

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{Key, Modifiers};
-use yuetu_core::{ConversionConfig, ConversionSeed, Palette, PaletteScope, Stage};
+use yuetu_core::{ConversionConfig, PaletteScope, Stage};
 
 use crate::jobs::{JobEvent, JobRunner, ProgressView};
 use crate::settings::Settings;
@@ -20,22 +20,10 @@ use crate::widgets::{View2D, split_handle, stage_rail};
 /// feeling immediate.
 const AUTO_CONVERT_DEBOUNCE: Duration = Duration::from_millis(80);
 
-/// Palette clustered from a whole animation sequence. Frame changes do not
-/// invalidate it: only loading a new source or changing the palette settings
-/// does. This keeps timeline scrubbing from re-scanning every frame.
-struct SharedPaletteCache {
-    source_generation: u64,
-    palette_colors: usize,
-    palette: Palette,
-}
-
 pub struct YuetuApp {
     source: Option<SourceImage>,
-    /// Increments whenever the source sequence changes (new file).
-    source_generation: u64,
     /// Increments whenever the source pixels change (new image or GIF frame).
     source_revision: u64,
-    shared_palette_cache: Option<SharedPaletteCache>,
     preview: Option<Preview>,
     settings: Settings,
 
@@ -63,7 +51,6 @@ pub struct YuetuApp {
     job_progress: Option<ProgressView>,
     job_config: Option<ConversionConfig>,
     job_source_revision: Option<u64>,
-    job_source_generation: Option<u64>,
     job_started: Option<Instant>,
     /// When the next automatic conversion should start. `None` means no
     /// parameters changed since the last result/job.
@@ -88,9 +75,7 @@ impl YuetuApp {
 
         let mut app = Self {
             source: None,
-            source_generation: 0,
             source_revision: 0,
-            shared_palette_cache: None,
             preview: None,
             settings: Settings::default(),
             stage: PipelineStage::Source,
@@ -115,7 +100,6 @@ impl YuetuApp {
             job_progress: None,
             job_config: None,
             job_source_revision: None,
-            job_source_generation: None,
             job_started: None,
             auto_convert_at: None,
             left_panel_width: 310.0,
@@ -148,14 +132,11 @@ impl YuetuApp {
         self.job_progress = None;
         self.job_config = None;
         self.job_source_revision = None;
-        self.job_source_generation = None;
         self.job_started = None;
         self.auto_convert_at = None;
 
         match SourceImage::load_with_gpu(ctx, path.clone(), self.gpu_render_state.clone()) {
             Ok(source) => {
-                self.source_generation = self.source_generation.wrapping_add(1);
-                self.shared_palette_cache = None;
                 self.settings.rotation_deg = 0.0;
                 self.status = StatusMessage::success(format!(
                     "已加载 {} · {} × {} px",
@@ -200,27 +181,8 @@ impl YuetuApp {
         }
 
         let config = self.conversion_config();
-        let seed = self.conversion_seed(&config);
-        let seed_has_palette = seed
-            .as_ref()
-            .and_then(|seed| seed.palette.as_ref())
-            .is_some();
-        let shared_palette =
-            if config.palette_scope == PaletteScope::AllFrames && config.manual_palette.is_none() {
-                self.shared_palette_cache
-                    .as_ref()
-                    .filter(|cache| {
-                        cache.source_generation == self.source_generation
-                            && cache.palette_colors == config.palette_colors
-                    })
-                    .map(|cache| cache.palette.clone())
-            } else {
-                None
-            };
-        let need_palette_frames = config.palette_scope == PaletteScope::AllFrames
-            && config.manual_palette.is_none()
-            && shared_palette.is_none()
-            && !seed_has_palette;
+        let need_palette_frames =
+            config.palette_scope == PaletteScope::AllFrames && config.manual_palette.is_none();
         let palette_frames = if need_palette_frames {
             source.palette_frames().to_vec()
         } else {
@@ -232,21 +194,17 @@ impl YuetuApp {
             Vec::new()
         };
         let image = source.image.clone();
-        let source_generation = self.source_generation;
         let generate_notes = self.stage == PipelineStage::Midi;
         match self.jobs.start(
             image,
             palette_frames,
             delays_ms,
-            shared_palette,
-            seed,
             config.clone(),
             generate_notes,
         ) {
             Ok(_) => {
                 self.job_config = Some(config);
                 self.job_source_revision = Some(self.source_revision);
-                self.job_source_generation = Some(source_generation);
                 self.job_started = Some(Instant::now());
                 self.job_progress = Some(ProgressView::new(Stage::Palette, 0.0));
                 self.status = StatusMessage::info("正在生成");
@@ -257,7 +215,6 @@ impl YuetuApp {
                 self.job_progress = None;
                 self.job_config = None;
                 self.job_source_revision = None;
-                self.job_source_generation = None;
                 self.job_started = None;
                 self.status = StatusMessage::error(format!("无法启动转换任务：{error}"));
             }
@@ -277,44 +234,6 @@ impl YuetuApp {
                 .cloned();
         }
         config
-    }
-
-    /// Build a stage-cache seed from the current preview when its upstream
-    /// keys still match the requested configuration.
-    fn conversion_seed(&self, config: &ConversionConfig) -> Option<ConversionSeed> {
-        let preview = self.preview.as_ref()?;
-        let previous = &preview.config;
-        let same_source = preview.source_revision == self.source_revision;
-        let same_keymap = keymap_config_eq(previous, config);
-        let same_palette = palette_config_eq(previous, config);
-        let same_transform = same_source && transform_config_eq(previous, config);
-
-        let mut seed = ConversionSeed::default();
-        if same_keymap {
-            seed.keymap = Some(preview.result.keymap.clone());
-        }
-        if same_palette {
-            seed.palette = Some(preview.result.palette.clone());
-        }
-        if same_transform {
-            seed.resized = Some(preview.result.resized_image.clone());
-            seed.resized_size = Some(preview.result.resized_size);
-            seed.source_size = Some(preview.result.source_size);
-            seed.time_axis = Some(preview.result.time_axis);
-            if same_palette {
-                seed.indexed = Some(preview.result.indexed_image.clone());
-            }
-        }
-
-        if seed.keymap.is_some()
-            || seed.palette.is_some()
-            || seed.resized.is_some()
-            || seed.indexed.is_some()
-        {
-            Some(seed)
-        } else {
-            None
-        }
     }
 
     /// Mark the current settings as dirty. A short debounce collapses slider
@@ -375,7 +294,6 @@ impl YuetuApp {
         self.job_progress = None;
         self.job_config = None;
         self.job_source_revision = None;
-        self.job_source_generation = None;
         self.job_started = None;
         self.status = StatusMessage::warning("已取消生成");
     }
@@ -489,7 +407,6 @@ impl YuetuApp {
         self.job_progress = None;
         self.job_config = None;
         self.job_source_revision = None;
-        self.job_source_generation = None;
         self.job_started = None;
     }
 
@@ -515,7 +432,6 @@ impl YuetuApp {
                         .unwrap_or_default();
                     let config = self.job_config.take().unwrap_or_default();
                     let source_revision = self.job_source_revision.take().unwrap_or_default();
-                    let job_source_generation = self.job_source_generation.take();
                     let current = self.conversion_config();
                     let had_preview = self.preview.is_some();
                     self.job_progress = None;
@@ -527,16 +443,6 @@ impl YuetuApp {
                         total_ms = result.timings.total_ms,
                         "conversion stage timings"
                     );
-                    if config.palette_scope == PaletteScope::AllFrames
-                        && config.manual_palette.is_none()
-                        && job_source_generation == Some(self.source_generation)
-                    {
-                        self.shared_palette_cache = Some(SharedPaletteCache {
-                            source_generation: self.source_generation,
-                            palette_colors: config.palette_colors,
-                            palette: result.palette.clone(),
-                        });
-                    }
                     if config == current && source_revision == self.source_revision {
                         let timings = result.timings;
                         let text = if result.notes_generated {
@@ -589,7 +495,6 @@ impl YuetuApp {
                     self.job_progress = None;
                     self.job_config = None;
                     self.job_source_revision = None;
-                    self.job_source_generation = None;
                     self.job_started = None;
                     tracing::warn!("conversion failed: {message}");
                     self.status = StatusMessage::error(format!("转换失败：{message}"));
@@ -598,7 +503,6 @@ impl YuetuApp {
                     self.job_progress = None;
                     self.job_config = None;
                     self.job_source_revision = None;
-                    self.job_source_generation = None;
                     self.job_started = None;
                     self.status = StatusMessage::warning("已取消生成");
                 }
@@ -1081,23 +985,8 @@ impl eframe::App for YuetuApp {
     }
 }
 
-fn keymap_config_eq(a: &ConversionConfig, b: &ConversionConfig) -> bool {
-    a.key_start == b.key_start
-        && a.key_end == b.key_end
-        && a.key_filter == b.key_filter
-        && a.column_mapping == b.column_mapping
-}
-
 fn palette_config_eq(a: &ConversionConfig, b: &ConversionConfig) -> bool {
     a.palette_colors == b.palette_colors
         && a.manual_palette == b.manual_palette
         && a.palette_scope == b.palette_scope
-}
-
-fn transform_config_eq(a: &ConversionConfig, b: &ConversionConfig) -> bool {
-    keymap_config_eq(a, b)
-        && a.resize == b.resize
-        && a.rotation_deg == b.rotation_deg
-        && a.time_axis == b.time_axis
-        && a.time_length == b.time_length
 }

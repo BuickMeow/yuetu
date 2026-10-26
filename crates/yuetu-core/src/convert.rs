@@ -84,22 +84,6 @@ impl Default for ConversionConfig {
     }
 }
 
-/// Artifacts that can be reused when only a downstream stage changed.
-///
-/// The caller is responsible for only filling fields whose upstream keys are
-/// unchanged. This keeps the core stateless while still allowing the app to
-/// turn the pipeline into a keyed stage cache.
-#[derive(Clone, Debug, Default)]
-pub struct ConversionSeed {
-    pub keymap: Option<KeyMap>,
-    pub palette: Option<Palette>,
-    pub resized: Option<RgbaImage>,
-    pub resized_size: Option<(u32, u32)>,
-    pub source_size: Option<(u32, u32)>,
-    pub time_axis: Option<TimeAxis>,
-    pub indexed: Option<IndexedImage>,
-}
-
 /// Per-stage wall-clock timings. They are diagnostic data, not part of the
 /// conversion contract.
 #[derive(Clone, Copy, Debug, Default)]
@@ -183,65 +167,10 @@ pub fn convert_frames_with_progress(
     progress: Option<&dyn Progress>,
     cancel: &AtomicBool,
 ) -> Result<ConversionResult> {
-    convert_frames_with_palette_and_progress(
+    convert_with_options(
         image,
         palette_frames,
         delays_ms,
-        None,
-        config,
-        progress,
-        cancel,
-    )
-}
-
-/// Like [`convert_frames_with_progress`], but can reuse a palette that was
-/// already clustered for the same animation sequence.
-///
-/// When a shared palette is supplied, the palette stage is skipped entirely,
-/// which is the expensive part of scrubbing through a long animation.
-#[allow(clippy::too_many_arguments)]
-pub fn convert_frames_with_palette_and_progress(
-    image: &RgbaImage,
-    palette_frames: &[&RgbaImage],
-    delays_ms: &[u32],
-    shared_palette: Option<&Palette>,
-    config: &ConversionConfig,
-    progress: Option<&dyn Progress>,
-    cancel: &AtomicBool,
-) -> Result<ConversionResult> {
-    convert_seeded_with_progress(
-        image,
-        palette_frames,
-        delays_ms,
-        shared_palette,
-        None,
-        config,
-        progress,
-        cancel,
-    )
-}
-
-/// Convert with optional reusable artifacts from upstream stages.
-///
-/// The caller is responsible for matching the seed against `config` and the
-/// source revision. Invalid seeds only affect quality, not memory safety.
-#[allow(clippy::too_many_arguments)]
-pub fn convert_seeded_with_progress(
-    image: &RgbaImage,
-    palette_frames: &[&RgbaImage],
-    delays_ms: &[u32],
-    shared_palette: Option<&Palette>,
-    seed: Option<&ConversionSeed>,
-    config: &ConversionConfig,
-    progress: Option<&dyn Progress>,
-    cancel: &AtomicBool,
-) -> Result<ConversionResult> {
-    convert_seeded_with_options(
-        image,
-        palette_frames,
-        delays_ms,
-        shared_palette,
-        seed,
         config,
         true,
         progress,
@@ -249,14 +178,18 @@ pub fn convert_seeded_with_progress(
     )
 }
 
-/// Like [`convert_seeded_with_progress`], but note generation can be deferred.
+/// Convert one frame, optionally using all frames of an animation sequence
+/// for the palette.
+///
+/// `palette_frames` is the complete, *unrotated* sequence. Rotation is a
+/// geometric operation and does not change the color distribution, so the
+/// palette can be computed without rotating every frame. The selected
+/// `image` is rotated before resizing.
 #[allow(clippy::too_many_arguments)]
-pub fn convert_seeded_with_options(
+pub fn convert_with_options(
     image: &RgbaImage,
     palette_frames: &[&RgbaImage],
     delays_ms: &[u32],
-    shared_palette: Option<&Palette>,
-    seed: Option<&ConversionSeed>,
     config: &ConversionConfig,
     generate_notes: bool,
     progress: Option<&dyn Progress>,
@@ -272,35 +205,16 @@ pub fn convert_seeded_with_options(
 
     let mut timings = StageTimings::default();
     let keymap_start = Instant::now();
-    let keymap = if let Some(keymap) = seed.and_then(|seed| seed.keymap.clone()) {
-        keymap
-    } else {
-        KeyMap::build(
-            config.key_start,
-            config.key_end,
-            config.key_filter,
-            config.column_mapping,
-        )?
-    };
+    let keymap = KeyMap::build(
+        config.key_start,
+        config.key_end,
+        config.key_filter,
+        config.column_mapping,
+    )?;
     timings.transform_ms += keymap_start.elapsed().as_secs_f32() * 1000.0;
 
-    let can_reuse_resized = seed.is_some_and(|seed| {
-        seed.resized.is_some()
-            && seed.source_size.is_some()
-            && seed.resized_size.is_some()
-            && seed.time_axis == Some(config.time_axis)
-    });
-    let palette_available = config.manual_palette.is_some()
-        || shared_palette.is_some_and(|palette| !palette.is_empty())
-        || seed
-            .and_then(|seed| seed.palette.as_ref())
-            .is_some_and(|palette| !palette.is_empty());
-    let needs_current_source = !palette_available
-        && (config.palette_scope == PaletteScope::CurrentFrame || palette_frames.is_empty());
-    let needs_rotated_source = !can_reuse_resized || needs_current_source;
-
     let rotation_start = Instant::now();
-    let rotated = if needs_rotated_source && normalize_degrees(config.rotation_deg) != 0.0 {
+    let rotated = if normalize_degrees(config.rotation_deg) != 0.0 {
         Some(rotate_image(image, config.rotation_deg)?)
     } else {
         None
@@ -314,15 +228,7 @@ pub fn convert_seeded_with_options(
         Some(palette) if !palette.is_empty() => palette.clone(),
         Some(_) => return Err(Error::Config("手动调色板不能为空".into())),
         None => {
-            if let Some(palette) = shared_palette.filter(|palette| !palette.is_empty()) {
-                palette.clone()
-            } else if let Some(palette) = seed
-                .and_then(|seed| seed.palette.as_ref())
-                .filter(|palette| !palette.is_empty())
-            {
-                palette.clone()
-            } else if config.palette_scope == PaletteScope::AllFrames && !palette_frames.is_empty()
-            {
+            if config.palette_scope == PaletteScope::AllFrames && !palette_frames.is_empty() {
                 Palette::from_frames_cancellable(
                     palette_frames.iter().copied(),
                     delays_ms,
@@ -350,48 +256,34 @@ pub fn convert_seeded_with_options(
     }
 
     let transform_start = Instant::now();
-    let (resized, source_size, resized_size) = if let Some((resized, source_size, resized_size)) =
-        seed.and_then(|seed| {
-            Some((
-                seed.resized.as_ref()?,
-                seed.source_size?,
-                seed.resized_size?,
-            ))
-        }) {
-        (resized.clone(), source_size, resized_size)
-    } else {
-        let key_count = keymap.width();
-        if key_count == 0 {
-            return Err(Error::Config("键映射没有产生任何列".into()));
-        }
+    let key_count = keymap.width();
+    if key_count == 0 {
+        return Err(Error::Config("键映射没有产生任何列".into()));
+    }
 
-        let time_rows = resolve_time_rows(
-            source.width,
-            source.height,
-            key_count,
-            config.time_axis,
-            config.time_length,
-        );
-        let (target_width, target_height) = config.time_axis.grid_size(key_count, time_rows);
+    let time_rows = resolve_time_rows(
+        source.width,
+        source.height,
+        key_count,
+        config.time_axis,
+        config.time_length,
+    );
+    let (target_width, target_height) = config.time_axis.grid_size(key_count, time_rows);
 
-        // A pathological custom height would otherwise allocate hundreds of
-        // millions of pixels. Fail loudly instead of OOM.
-        const MAX_CONVERTED_SIDE: u32 = 65_535;
-        if target_width > MAX_CONVERTED_SIDE || target_height > MAX_CONVERTED_SIDE {
-            return Err(Error::Config(format!(
-                "缩放后尺寸 {target_width}×{target_height}px 超过单边上限 {MAX_CONVERTED_SIDE}px；请先裁剪图片或减小时间行数"
-            )));
-        }
+    // A pathological custom height would otherwise allocate hundreds of
+    // millions of pixels. Fail loudly instead of OOM.
+    const MAX_CONVERTED_SIDE: u32 = 65_535;
+    if target_width > MAX_CONVERTED_SIDE || target_height > MAX_CONVERTED_SIDE {
+        return Err(Error::Config(format!(
+            "缩放后尺寸 {target_width}×{target_height}px 超过单边上限 {MAX_CONVERTED_SIDE}px；请先裁剪图片或减小时间行数"
+        )));
+    }
 
-        report(progress, Stage::Resize, 0.0);
-        let resized = resize(source, target_width, target_height, config.resize)?;
-        report(progress, Stage::Resize, 1.0);
-        (
-            resized,
-            (source.width, source.height),
-            (target_width, target_height),
-        )
-    };
+    report(progress, Stage::Resize, 0.0);
+    let resized = resize(source, target_width, target_height, config.resize)?;
+    report(progress, Stage::Resize, 1.0);
+    let source_size = (source.width, source.height);
+    let resized_size = (target_width, target_height);
     let time_rows = match config.time_axis {
         TimeAxis::Vertical => resized_size.1,
         TimeAxis::Horizontal => resized_size.0,
@@ -402,11 +294,7 @@ pub fn convert_seeded_with_options(
     }
 
     let quantize_start = Instant::now();
-    let indexed = if let Some(indexed) = seed.and_then(|seed| seed.indexed.clone()) {
-        indexed
-    } else {
-        quantize_with_progress(&resized, &palette, cancel, progress)?
-    };
+    let indexed = quantize_with_progress(&resized, &palette, cancel, progress)?;
     timings.quantize_ms = quantize_start.elapsed().as_secs_f32() * 1000.0;
 
     let notes_start = Instant::now();
@@ -686,50 +574,6 @@ mod tests {
     }
 
     #[test]
-    fn seeded_conversion_reuses_upstream_stages() {
-        let image = solid_red(8, 8);
-        let config = ConversionConfig {
-            key_start: 60,
-            key_end: 63,
-            palette_colors: 1,
-            ..ConversionConfig::default()
-        };
-        let cancel = AtomicBool::new(false);
-        let first = convert_with_progress(&image, &config, None, &cancel).unwrap();
-        assert!(first.timings.total_ms >= 0.0);
-
-        let seed = ConversionSeed {
-            keymap: Some(first.keymap.clone()),
-            palette: Some(first.palette.clone()),
-            resized: Some(first.resized_image.clone()),
-            resized_size: Some(first.resized_size),
-            source_size: Some(first.source_size),
-            time_axis: Some(first.time_axis),
-            indexed: Some(first.indexed_image.clone()),
-        };
-        let next_config = ConversionConfig {
-            max_note_length: 2,
-            ..config
-        };
-        let second = convert_seeded_with_progress(
-            &image,
-            &[],
-            &[],
-            None,
-            Some(&seed),
-            &next_config,
-            None,
-            &cancel,
-        )
-        .unwrap();
-
-        assert_eq!(second.palette, first.palette);
-        assert_eq!(second.keymap, first.keymap);
-        assert_eq!(second.resized_size, first.resized_size);
-        assert_ne!(second.notes.len(), first.notes.len());
-    }
-
-    #[test]
     fn notes_can_be_deferred_without_losing_the_indexed_image() {
         let image = solid_red(8, 8);
         let config = ConversionConfig {
@@ -739,18 +583,7 @@ mod tests {
             ..ConversionConfig::default()
         };
         let cancel = AtomicBool::new(false);
-        let result = convert_seeded_with_options(
-            &image,
-            &[],
-            &[],
-            None,
-            None,
-            &config,
-            false,
-            None,
-            &cancel,
-        )
-        .unwrap();
+        let result = convert_with_options(&image, &[], &[], &config, false, None, &cancel).unwrap();
 
         assert!(!result.notes_generated);
         assert!(result.notes.is_empty());
@@ -852,34 +685,6 @@ mod tests {
         assert_eq!(horizontal.time_axis, TimeAxis::Horizontal);
         assert_eq!(horizontal.time_rows, 2);
         assert_eq!(horizontal.resized_size, (2, 1));
-    }
-
-    #[test]
-    fn supplied_shared_palette_overrides_frame_clustering() {
-        let image = RgbaImage::new(2, 2, Color::rgb(255, 0, 0));
-        let other = RgbaImage::new(2, 2, Color::rgb(0, 0, 255));
-        let palette = Palette::new(vec![Color::rgb(0, 255, 0), Color::rgb(255, 255, 0)]);
-        let config = ConversionConfig {
-            key_start: 60,
-            key_end: 60,
-            palette_colors: 2,
-            palette_scope: PaletteScope::AllFrames,
-            ..ConversionConfig::default()
-        };
-        let cancel = AtomicBool::new(false);
-
-        let result = convert_frames_with_palette_and_progress(
-            &image,
-            &[&image, &other],
-            &[100, 100],
-            Some(&palette),
-            &config,
-            None,
-            &cancel,
-        )
-        .unwrap();
-
-        assert_eq!(result.palette, palette);
     }
 
     #[test]
