@@ -941,7 +941,41 @@ impl eframe::App for YuetuApp {
                             self.status = StatusMessage::info("调整旋转…");
                             if matches!(self.stage, PipelineStage::KeyMap | PipelineStage::Palette)
                             {
-                                self.update_scrub_preview(&ctx);
+                                let config = self.conversion_config();
+                                let target = self.source.as_ref().and_then(|source| {
+                                    Preview::scrub_target_size(
+                                        &config,
+                                        source.display_size,
+                                        self.stage,
+                                    )
+                                    .ok()
+                                });
+                                let mut ready = true;
+                                if self
+                                    .source
+                                    .as_ref()
+                                    .is_some_and(|source| source.vector().is_some())
+                                {
+                                    match target {
+                                        Some(target) => {
+                                            if let Some(source) = self.source.as_mut()
+                                                && let Err(error) = source
+                                                    .set_vector_rotation_interaction(
+                                                        target, degrees,
+                                                    )
+                                            {
+                                                self.status = StatusMessage::error(format!(
+                                                    "旋转预览失败：{error}"
+                                                ));
+                                                ready = false;
+                                            }
+                                        }
+                                        None => ready = false,
+                                    }
+                                }
+                                if ready {
+                                    self.update_scrub_preview(&ctx);
+                                }
                             }
                         } else {
                             self.rotation_scrub_pending = false;

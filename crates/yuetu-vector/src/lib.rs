@@ -298,10 +298,68 @@ impl VectorDocument {
         self.render_page_rotated_to_fit(0, width, height, degrees)
     }
 
+    /// Transform mapping a rotated page canvas into an exact target size,
+    /// stretching it the same way `resize` does in the conversion pipeline.
+    pub fn rotation_target_transform(
+        &self,
+        page: usize,
+        width: u32,
+        height: u32,
+        degrees: f32,
+    ) -> Option<ViewTransform> {
+        let (page_w, page_h) = self.page_size(page)?;
+        if page_w <= 0.0 || page_h <= 0.0 || width == 0 || height == 0 {
+            return None;
+        }
+        let angle = normalize_degrees(degrees);
+        let (rotated_w, rotated_h) = rotated_page_size(page_w, page_h, angle);
+        if rotated_w <= 0.0 || rotated_h <= 0.0 {
+            return None;
+        }
+        let sx = width as f32 / rotated_w;
+        let sy = height as f32 / rotated_h;
+        let radians = angle.to_radians();
+        let (sin, cos) = radians.sin_cos();
+        let ex = rotated_w * 0.5 - cos * page_w * 0.5 + sin * page_h * 0.5;
+        let ey = rotated_h * 0.5 - sin * page_w * 0.5 - cos * page_h * 0.5;
+        Some(ViewTransform {
+            a: sx * cos,
+            b: sy * sin,
+            c: -sx * sin,
+            d: sy * cos,
+            e: sx * ex,
+            f: sy * ey,
+        })
+    }
+
+    /// Render a page rotated clockwise at an exact target size. The rotated
+    /// page canvas is stretched to fill the target, matching the conversion
+    /// resize used by the key-map and palette previews. This avoids building a
+    /// full-resolution intermediate raster just to downscale it later.
+    pub fn render_page_rotated_to_size(
+        &self,
+        page: usize,
+        width: u32,
+        height: u32,
+        degrees: f32,
+    ) -> Result<RgbaImage, VectorError> {
+        let angle = normalize_degrees(degrees);
+        let transform = self
+            .rotation_target_transform(page, width, height, angle)
+            .ok_or(VectorError::InvalidSize)?;
+        if self.supports_view_render() && !matches!(&self.backend, Backend::Eps(_)) {
+            return self.render_page_view(page, width, height, transform);
+        }
+
+        // stet's CPU region renderer cannot rotate a viewport. Render a tight
+        // rotated page and resample it into the target for the preview.
+        let tight = self.render_page_rotated_tight(page, width.max(height), angle)?;
+        resize(&tight, width, height, ResizeAlgorithm::Area)
+            .map_err(|error| VectorError::Parse(error.to_string()))
+    }
+
     /// Render a page rotated clockwise into a tight raster whose long side is
-    /// at most `long_side`. Unlike [`Self::render_page_rotated_to_fit`], the
-    /// result has no transparent padding; this is used as a cheap live
-    /// interaction image while the rotation slider is being dragged.
+    /// at most `long_side`.
     pub fn render_page_rotated_tight(
         &self,
         page: usize,
@@ -921,6 +979,23 @@ mod tests {
             },
         );
         assert!(scene.is_some());
+    }
+
+    #[test]
+    fn rotated_target_render_fills_the_exact_preview_size() {
+        let document = fixture("vector.svg");
+        let image = document
+            .render_page_rotated_to_size(0, 128, 1536, 31.0)
+            .unwrap();
+        assert_eq!((image.width, image.height), (128, 1536));
+        assert!(image.pixels.iter().any(|byte| *byte != 0));
+
+        let document = fixture("vector.pdf");
+        let image = document
+            .render_page_rotated_to_size(0, 128, 1536, 31.0)
+            .unwrap();
+        assert_eq!((image.width, image.height), (128, 1536));
+        assert!(image.pixels.iter().any(|byte| *byte != 0));
     }
 
     #[test]

@@ -25,9 +25,6 @@ const THUMBNAIL_MAX_SIDE: u32 = 96;
 /// Working-resolution source used by stage previews while scrubbing. The
 /// final conversion still uses the original image.
 const INTERACTION_MAX_SIDE: u32 = 1024;
-/// Small vector raster used only while the rotation slider is moving. The
-/// full interaction/display rasters are rebuilt once the drag ends.
-const LIVE_ROTATION_PREVIEW_SIDE: u32 = 256;
 /// Rasterization width used by the existing pixel pipeline for SVG sources.
 /// Display rendering is independent and follows the viewport zoom.
 const VECTOR_RASTER_LONG_SIDE: u32 = 2048;
@@ -121,9 +118,24 @@ impl VectorSource {
         self.document.page_has_alpha()
     }
 
-    fn rotation_interaction_image(&self, max_side: u32, rotation: f32) -> Option<Arc<RgbaImage>> {
+    fn render_rotation_target(
+        &self,
+        width: u32,
+        height: u32,
+        rotation: f32,
+    ) -> Option<Arc<RgbaImage>> {
+        if !self.document.page_has_alpha()
+            && let Some(transform) = self
+                .document
+                .rotation_target_transform(self.page, width, height, rotation)
+            && let Some(image) = self.gpu.borrow_mut().as_mut().and_then(|gpu| {
+                gpu.render_image(&self.document, self.page, width, height, transform)
+            })
+        {
+            return Some(Arc::new(image));
+        }
         self.document
-            .render_page_rotated_tight(self.page, max_side, rotation)
+            .render_page_rotated_to_size(self.page, width, height, rotation)
             .ok()
             .map(Arc::new)
     }
@@ -679,13 +691,6 @@ impl SourceImage {
             // what made live rotation feel frozen.
             self.display_size = rotated_dimensions(self.image.width, self.image.height, degrees);
             self.rotation_preview_dirty = true;
-            if !upload_display_texture {
-                if let Some(image) = self.vector.as_ref().and_then(|vector| {
-                    vector.rotation_interaction_image(LIVE_ROTATION_PREVIEW_SIDE, degrees)
-                }) {
-                    self.interaction_image = image;
-                }
-            }
             for thumbnail in &mut self.thumbnails {
                 *thumbnail = None;
             }
@@ -694,6 +699,23 @@ impl SourceImage {
 
         self.rebuild_rotation_preview(ctx, upload_display_texture)?;
         Ok(true)
+    }
+
+    /// Build the exact target-sized interaction image used by key-map and
+    /// palette stages while the rotation slider is live.
+    pub fn set_vector_rotation_interaction(
+        &mut self,
+        target: (u32, u32),
+        degrees: f32,
+    ) -> yuetu_core::Result<()> {
+        let Some(vector) = self.vector.as_ref() else {
+            return Ok(());
+        };
+        let image = vector
+            .render_rotation_target(target.0, target.1, degrees)
+            .ok_or_else(|| yuetu_core::Error::InvalidImage("无法生成矢量旋转预览".into()))?;
+        self.interaction_image = image;
+        Ok(())
     }
 
     /// Rebuild the CPU display/interaction rasters after a live vector drag.
@@ -1151,6 +1173,33 @@ impl Preview {
     /// key-map or palette stage. It uses the same resize algorithm as the
     /// final conversion so releasing the mouse does not change the picture.
     /// The full result (notes, MIDI instances, export metadata) is untouched.
+    pub fn scrub_target_size(
+        config: &ConversionConfig,
+        full_source_size: (u32, u32),
+        stage: PipelineStage,
+    ) -> yuetu_core::Result<(u32, u32)> {
+        if !matches!(stage, PipelineStage::KeyMap | PipelineStage::Palette) {
+            return Err(yuetu_core::Error::InvalidImage(
+                "只有键位映射和调色板阶段需要交互预览".into(),
+            ));
+        }
+        let keymap = KeyMap::build(
+            config.key_start,
+            config.key_end,
+            config.key_filter,
+            config.column_mapping,
+        )?;
+        let key_count = keymap.width().max(1);
+        let time_rows = resolve_time_rows(
+            full_source_size.0,
+            full_source_size.1,
+            key_count,
+            config.time_axis,
+            config.time_length,
+        );
+        Ok(config.time_axis.grid_size(key_count, time_rows))
+    }
+
     pub fn update_scrub_frame(
         &mut self,
         ctx: &egui::Context,
@@ -1166,16 +1215,12 @@ impl Preview {
             config.key_filter,
             config.column_mapping,
         )?;
-        let key_count = keymap.width().max(1);
-        let time_rows = resolve_time_rows(
-            full_source_size.0,
-            full_source_size.1,
-            key_count,
-            config.time_axis,
-            config.time_length,
-        );
-        let target_size = config.time_axis.grid_size(key_count, time_rows);
-        let resized = resize(image, target_size.0, target_size.1, config.resize)?;
+        let target_size = Self::scrub_target_size(config, full_source_size, stage)?;
+        let resized = if image.width == target_size.0 && image.height == target_size.1 {
+            RgbaImage::from_rgba(image.width, image.height, image.pixels.clone())?
+        } else {
+            resize(image, target_size.0, target_size.1, config.resize)?
+        };
 
         self.interaction = Some(match stage {
             PipelineStage::KeyMap => {
