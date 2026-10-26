@@ -628,6 +628,9 @@ impl eframe::App for YuetuApp {
         self.handle_shortcuts(&ctx);
         self.handle_dropped_files(&ctx);
         self.poll_jobs(&ctx);
+        if let Some(source) = &self.source {
+            source.begin_thumbnails();
+        }
 
         let root_rect = ui.max_rect();
         let total_width = root_rect.width();
