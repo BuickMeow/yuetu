@@ -158,33 +158,41 @@ fn rotate_arbitrary(image: &RgbaImage, angle: f32) -> Result<RgbaImage> {
 
 /// Bilinear sample at continuous pixel-edge coordinates. Returns straight RGBA.
 pub fn sample_bilinear(image: &RgbaImage, x: f64, y: f64) -> [u8; 4] {
-    let px = x - 0.5;
-    let py = y - 0.5;
-    let x0 = px.floor() as i64;
-    let y0 = py.floor() as i64;
-    let fx = px - x0 as f64;
-    let fy = py - y0 as f64;
+    const INV_255: f32 = 1.0 / 255.0;
+    let px = x as f32 - 0.5;
+    let py = y as f32 - 0.5;
+    let x0 = px.floor();
+    let y0 = py.floor();
+    let fx = px - x0;
+    let fy = py - y0;
+    let x0 = x0 as i64;
+    let y0 = y0 as i64;
 
-    let mut premultiplied = [0.0f64; 4];
-    for (dy, wy) in [(0i64, 1.0 - fy), (1, fy)] {
-        if wy <= 0.0 {
-            continue;
+    let mut premultiplied = [0.0f32; 4];
+    let mut accumulate = |sx: i64, sy: i64, weight: f32| {
+        if sx < 0
+            || sy < 0
+            || sx >= i64::from(image.width)
+            || sy >= i64::from(image.height)
+            || weight <= 0.0
+        {
+            return;
         }
-        for (dx, wx) in [(0i64, 1.0 - fx), (1, fx)] {
-            if wx <= 0.0 {
-                continue;
-            }
-            let weight = wx * wy;
-            if let Some(color) = sample_premultiplied(image, x0 + dx, y0 + dy) {
-                for channel in 0..4 {
-                    premultiplied[channel] += color[channel] * weight;
-                }
-            }
-        }
-    }
+        let index = (sy as usize * image.width as usize + sx as usize) * 4;
+        let pixel = &image.pixels[index..index + 4];
+        let alpha = f32::from(pixel[3]) * INV_255;
+        premultiplied[0] += f32::from(pixel[0]) * INV_255 * alpha * weight;
+        premultiplied[1] += f32::from(pixel[1]) * INV_255 * alpha * weight;
+        premultiplied[2] += f32::from(pixel[2]) * INV_255 * alpha * weight;
+        premultiplied[3] += alpha * weight;
+    };
+    accumulate(x0, y0, (1.0 - fx) * (1.0 - fy));
+    accumulate(x0 + 1, y0, fx * (1.0 - fy));
+    accumulate(x0, y0 + 1, (1.0 - fx) * fy);
+    accumulate(x0 + 1, y0 + 1, fx * fy);
 
     let alpha = premultiplied[3];
-    if alpha <= 1e-9 {
+    if alpha <= f32::EPSILON {
         return [0, 0, 0, 0];
     }
     [
@@ -193,20 +201,6 @@ pub fn sample_bilinear(image: &RgbaImage, x: f64, y: f64) -> [u8; 4] {
         (premultiplied[2] / alpha * 255.0).round().clamp(0.0, 255.0) as u8,
         (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
     ]
-}
-
-fn sample_premultiplied(image: &RgbaImage, x: i64, y: i64) -> Option<[f64; 4]> {
-    if x < 0 || y < 0 || x >= i64::from(image.width) || y >= i64::from(image.height) {
-        return None;
-    }
-    let color = image.pixel_unchecked(x as u32, y as u32);
-    let alpha = f64::from(color.a) / 255.0;
-    Some([
-        f64::from(color.r) / 255.0 * alpha,
-        f64::from(color.g) / 255.0 * alpha,
-        f64::from(color.b) / 255.0 * alpha,
-        alpha,
-    ])
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use rayon::prelude::*;
 use resvg::tiny_skia;
 use thiserror::Error;
 use yuetu_core::{ResizeAlgorithm, RgbaImage, resize::resize};
@@ -595,7 +596,7 @@ fn render_eps_region(
     height: u32,
 ) -> Result<RgbaImage, VectorError> {
     let prepared = stet::prepare_display_list(&page.display_list);
-    let rgba = stet::render_region_prepared(
+    let rgba = stet_render::render_region_prepared_parallel(
         &page.display_list,
         &prepared,
         vp_x,
@@ -669,18 +670,24 @@ fn render_eps_rotated_view(
         },
     );
 
-    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
-    for y in 0..height {
-        for x in 0..width {
-            let (px, py) = inverse.apply(f64::from(x) + 0.5, f64::from(y) + 0.5);
-            let color = yuetu_core::sample_bilinear(
-                &raster,
-                (px - min_x) * scale_x,
-                (py - min_y) * scale_y,
-            );
-            pixels.extend_from_slice(&color);
-        }
-    }
+    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    let row_bytes = width as usize * 4;
+    pixels
+        .par_chunks_mut(row_bytes)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y = f64::from(y as u32) + 0.5;
+            for x in 0..width {
+                let (px, py) = inverse.apply(f64::from(x) + 0.5, y);
+                let color = yuetu_core::sample_bilinear(
+                    &raster,
+                    (px - min_x) * scale_x,
+                    (py - min_y) * scale_y,
+                );
+                let start = x as usize * 4;
+                row[start..start + 4].copy_from_slice(&color);
+            }
+        });
     RgbaImage::from_rgba(width, height, pixels)
         .map_err(|error| VectorError::Parse(error.to_string()))
 }
@@ -714,6 +721,8 @@ fn unmatte_eps_page(
     if x0 <= 0.0 && x1 >= width && y0 <= 0.0 && y1 >= height {
         return;
     }
+    let full_x_start = x0.ceil().clamp(0.0, width) as u32;
+    let full_x_end = x1.floor().clamp(0.0, width) as u32;
 
     for y in 0..image.height {
         let cy = interval_coverage(y, y0, y1);
@@ -721,28 +730,41 @@ fn unmatte_eps_page(
             clear_scanline(image, y);
             continue;
         }
+        if cy >= 1.0 {
+            // Only the page's left/right edge columns need unmatting.
+            for x in 0..full_x_start {
+                unmatte_eps_pixel(image, x, y, interval_coverage(x, x0, x1));
+            }
+            for x in full_x_end..image.width {
+                unmatte_eps_pixel(image, x, y, interval_coverage(x, x0, x1));
+            }
+            continue;
+        }
+        // A partially covered row: every column needs the vertical coverage.
         for x in 0..image.width {
-            let cx = interval_coverage(x, x0, x1);
-            let coverage = cx * cy;
-            if coverage >= 1.0 {
-                continue;
-            }
-            let index = (y as usize * image.width as usize + x as usize) * 4;
-            if coverage <= 0.0 {
-                image.pixels[index..index + 4].fill(0);
-                continue;
-            }
-            // stet added `255 - alpha` to each premultiplied channel to put
-            // the page on white. Remove the same amount for the page area the
-            // output pixel does not cover.
-            let white = (1.0 - coverage) * 255.0;
-            for channel in &mut image.pixels[index..index + 3] {
-                let premultiplied = (f64::from(*channel) - white).max(0.0);
-                *channel = (premultiplied / coverage).round().clamp(0.0, 255.0) as u8;
-            }
-            image.pixels[index + 3] = (coverage * 255.0).round().clamp(0.0, 255.0) as u8;
+            unmatte_eps_pixel(image, x, y, interval_coverage(x, x0, x1) * cy);
         }
     }
+}
+
+fn unmatte_eps_pixel(image: &mut RgbaImage, x: u32, y: u32, coverage: f64) {
+    let index = (y as usize * image.width as usize + x as usize) * 4;
+    if coverage <= 0.0 {
+        image.pixels[index..index + 4].fill(0);
+        return;
+    }
+    if coverage >= 1.0 {
+        return;
+    }
+    // stet added `255 - alpha` to each premultiplied channel to put the page
+    // on white. Remove the same amount for the page area the output pixel
+    // does not cover.
+    let white = (1.0 - coverage) * 255.0;
+    for channel in &mut image.pixels[index..index + 3] {
+        let premultiplied = (f64::from(*channel) - white).max(0.0);
+        *channel = (premultiplied / coverage).round().clamp(0.0, 255.0) as u8;
+    }
+    image.pixels[index + 3] = (coverage * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
 fn interval_coverage(pixel: u32, start: f64, end: f64) -> f64 {

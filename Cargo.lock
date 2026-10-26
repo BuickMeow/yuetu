@@ -5098,8 +5098,10 @@ version = "0.1.0"
 dependencies = [
  "hayro",
  "pollster 0.4.0",
+ "rayon",
  "resvg",
  "stet",
+ "stet-render",
  "thiserror 2.0.21",
  "usvg",
  "vello_common 0.3.0",
