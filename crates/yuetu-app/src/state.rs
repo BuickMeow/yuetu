@@ -10,6 +10,7 @@ use yuetu_core::{
     Color, ConversionConfig, ConversionResult, ImageSequence, IndexedImage, KeyMap, Palette,
     ResizeAlgorithm, RgbaImage, TimeAxis, generate_notes_on_grid, load_image_sequence,
     normalize_degrees, quantize, resolve_time_rows, rotate_image, rotated_dimensions,
+    rotated_dimensions_f32,
 };
 use yuetu_vector::VectorDocument;
 
@@ -121,7 +122,7 @@ impl VectorSource {
             ppp,
             out_scale_x,
             out_scale_y,
-        );
+        )?;
 
         if let Some(texture) = self
             .gpu
@@ -598,26 +599,15 @@ fn vector_view_transform(
     pixels_per_point: f32,
     out_scale_x: f32,
     out_scale_y: f32,
-) -> yuetu_vector::ViewTransform {
+) -> Option<yuetu_vector::ViewTransform> {
     let (page_w, page_h) = page_size;
-    let radians = rotation.to_radians();
-    let (sin, cos) = radians.sin_cos();
-    let rotated_w = page_w * cos.abs() + page_h * sin.abs();
-    let rotated_h = page_w * sin.abs() + page_h * cos.abs();
+    let angle = normalize_degrees(rotation);
+    let (rotated_w, rotated_h) = rotated_dimensions_f32(page_w, page_h, angle);
     let sx = content.width() / rotated_w.max(1e-6) * pixels_per_point * out_scale_x;
     let sy = content.height() / rotated_h.max(1e-6) * pixels_per_point * out_scale_y;
-    let ex = rotated_w * 0.5 - cos * page_w * 0.5 + sin * page_h * 0.5;
-    let ey = rotated_h * 0.5 - sin * page_w * 0.5 - cos * page_h * 0.5;
     let tx = (content.left() - viewport.left()) * pixels_per_point * out_scale_x;
     let ty = (content.top() - viewport.top()) * pixels_per_point * out_scale_y;
-    yuetu_vector::ViewTransform {
-        a: sx * cos,
-        b: sy * sin,
-        c: -sx * sin,
-        d: sy * cos,
-        e: sx * ex + tx,
-        f: sy * ey + ty,
-    }
+    yuetu_vector::ViewTransform::rotated_page(page_w, page_h, angle, sx, sy, tx, ty)
 }
 
 fn is_vector(path: &Path) -> bool {
@@ -1237,7 +1227,8 @@ mod tests {
             1.0,
             1.0,
             1.0,
-        );
+        )
+        .unwrap();
         let image = document.render_page_view(0, 1000, 800, transform).unwrap();
         // The first PDF page's red circle is centered at (130, 160); the
         // content mapping says that point belongs near (459, 396).
@@ -1254,7 +1245,8 @@ mod tests {
         let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 800.0));
         for rotation in [0.0, 37.0, 90.0, -45.0] {
             let transform =
-                vector_view_transform((400.0, 300.0), content, viewport, rotation, 1.0, 1.0, 1.0);
+                vector_view_transform((400.0, 300.0), content, viewport, rotation, 1.0, 1.0, 1.0)
+                    .unwrap();
             let x = transform.a * 200.0 + transform.c * 150.0 + transform.e;
             let y = transform.b * 200.0 + transform.d * 150.0 + transform.f;
             assert!((x - content.center().x).abs() < 0.01, "{rotation}");
@@ -1267,7 +1259,7 @@ mod tests {
         let content = egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(900.0, 650.0));
         let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 800.0));
         let transform =
-            vector_view_transform((400.0, 300.0), content, viewport, 0.0, 2.0, 1.0, 1.0);
+            vector_view_transform((400.0, 300.0), content, viewport, 0.0, 2.0, 1.0, 1.0).unwrap();
         assert!((transform.a - 4.0).abs() < 0.01);
         assert!((transform.d - 4.0).abs() < 0.01);
         assert!((transform.e - 200.0).abs() < 0.01);

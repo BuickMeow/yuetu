@@ -120,6 +120,48 @@ impl ViewTransform {
     fn is_axis_aligned(self) -> bool {
         self.b == 0.0 && self.c == 0.0 && self.a > 0.0 && self.d > 0.0
     }
+
+    /// Map a page rotated clockwise into an output canvas.
+    ///
+    /// `scale_x`/`scale_y` are output pixels per rotated-canvas unit and
+    /// `offset_x`/`offset_y` place that canvas inside the output.
+    pub fn rotated_page(
+        page_width: f32,
+        page_height: f32,
+        degrees: f32,
+        scale_x: f32,
+        scale_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Option<Self> {
+        if page_width <= 0.0
+            || page_height <= 0.0
+            || scale_x <= 0.0
+            || scale_y <= 0.0
+            || !scale_x.is_finite()
+            || !scale_y.is_finite()
+        {
+            return None;
+        }
+        let angle = yuetu_core::normalize_degrees(degrees);
+        let (rotated_w, rotated_h) =
+            yuetu_core::rotated_dimensions_f32(page_width, page_height, angle);
+        if rotated_w <= 0.0 || rotated_h <= 0.0 {
+            return None;
+        }
+        let radians = angle.to_radians();
+        let (sin, cos) = radians.sin_cos();
+        let ex = rotated_w * 0.5 - cos * page_width * 0.5 + sin * page_height * 0.5;
+        let ey = rotated_h * 0.5 - sin * page_width * 0.5 - cos * page_height * 0.5;
+        Some(Self {
+            a: scale_x * cos,
+            b: scale_y * sin,
+            c: -scale_x * sin,
+            d: scale_y * cos,
+            e: scale_x * ex + offset_x,
+            f: scale_y * ey + offset_y,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -380,18 +422,7 @@ impl VectorDocument {
                 0.0,
             ),
         };
-        let radians = angle.to_radians();
-        let (sin, cos) = radians.sin_cos();
-        let ex = rotated_w * 0.5 - cos * page_w * 0.5 + sin * page_h * 0.5;
-        let ey = rotated_h * 0.5 - sin * page_w * 0.5 - cos * page_h * 0.5;
-        Some(ViewTransform {
-            a: sx * cos,
-            b: sy * sin,
-            c: -sx * sin,
-            d: sy * cos,
-            e: sx * ex + offset_x,
-            f: sy * ey + offset_y,
-        })
+        ViewTransform::rotated_page(page_w, page_h, angle, sx, sy, offset_x, offset_y)
     }
 
     /// Render an exact-aspect page into the requested raster dimensions.
