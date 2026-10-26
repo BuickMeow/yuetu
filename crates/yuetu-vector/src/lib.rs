@@ -465,12 +465,14 @@ fn render_pdf_page(
     }
     let scale_x = width as f32 / page_w;
     let scale_y = height as f32 / page_h;
-    let cache = hayro::RenderCache::new();
+    // hayro requires a cache object for the duration of this call; it is
+    // dropped with the render and never retained between frames.
+    let render_cache = hayro::RenderCache::new();
     let settings = hayro::hayro_interpret::InterpreterSettings::default();
     let render_settings = hayro::RenderSettings::default();
     let pixmap = hayro::render(
         page,
-        &cache,
+        &render_cache,
         &settings,
         &render_settings,
         &hayro::PixmapSettings {
@@ -500,13 +502,14 @@ fn render_pdf_page_view(
     }
     let settings = hayro::hayro_interpret::InterpreterSettings::default();
     let render_settings = hayro::RenderSettings::default();
-    let cache = hayro::RenderCache::new();
+    // Per-call scratch required by hayro; not retained across renders.
+    let render_cache = hayro::RenderCache::new();
     let mut ctx = hayro::vello_cpu::RenderContext::new(width as u16, height as u16);
     use hayro::hayro_interpret::util::TransformExt;
     let page_transform = transform.kurbo() * page.initial_transform(true).to_kurbo();
     hayro::render_into(
         page,
-        &cache,
+        &render_cache,
         &settings,
         &render_settings,
         &mut ctx,

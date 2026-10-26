@@ -33,10 +33,11 @@ pub(crate) fn build(
     }
 
     let initial = to_affine(transform) * page.initial_transform(true).to_kurbo();
-    let cache = InterpreterCache::new();
+    // Per-call scratch required by hayro; not retained across scenes.
+    let interpreter_cache = InterpreterCache::new();
     let settings = InterpreterSettings::default();
     let bbox = Rect::new(0.0, 0.0, f64::from(width as u16), f64::from(height as u16));
-    let mut context = Context::new(initial, bbox, &cache, page.xref(), settings);
+    let mut context = Context::new(initial, bbox, &interpreter_cache, page.xref(), settings);
 
     let mut scene = Scene::new(width as u16, height as u16);
     let mut clip = page.intersected_crop_box().to_kurbo().to_path(0.1);
