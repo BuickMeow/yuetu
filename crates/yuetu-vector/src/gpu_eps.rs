@@ -32,6 +32,19 @@ pub(crate) fn build(
     {
         return None;
     }
+    // The white paper is a separate filled path under the artwork. When the
+    // page is rotated, both the paper edge and the artwork edge are
+    // antialiased independently, so the paper leaks into the boundary pixels
+    // as a white fringe. Only take the GPU path when the page is axis-aligned
+    // and its edges can coincide with the pixel grid; rotated EPS uses the
+    // CPU page raster, which is rotated with premultiplied alpha.
+    if transform.b.abs() > 1e-4
+        || transform.c.abs() > 1e-4
+        || transform.a <= 0.0
+        || transform.d <= 0.0
+    {
+        return None;
+    }
 
     let view = to_affine(transform);
     let page_path = Rect::new(0.0, 0.0, page_width, page_height).to_path(0.1);

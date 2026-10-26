@@ -192,6 +192,15 @@ impl VectorDocument {
         !matches!(self.backend, Backend::Eps(_))
     }
 
+    /// Whether a rotated view can use the Vello scene builder. Opaque EPS
+    /// pages paint white paper as a second path under the artwork; rotating
+    /// that scene makes the paper and artwork edges antialias independently
+    /// and leaks white into the boundary pixels. Transparent pages have no
+    /// paper path, so their rotated scenes are safe.
+    pub fn supports_gpu_rotation(&self) -> bool {
+        self.page_has_alpha()
+    }
+
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
@@ -581,7 +590,92 @@ fn render_eps_view(
         None,
         false,
     );
-    RgbaImage::from_rgba(width, height, rgba).map_err(|error| VectorError::Parse(error.to_string()))
+    let mut image = RgbaImage::from_rgba(width, height, rgba)
+        .map_err(|error| VectorError::Parse(error.to_string()))?;
+    unmatte_eps_page(
+        &mut image,
+        f64::from(page.width),
+        f64::from(page.height),
+        transform,
+    );
+    Ok(image)
+}
+
+/// stet's region renderer always composites the page onto white paper, even
+/// when only part of a page edge covers an output pixel. That is correct for a
+/// fully opaque page, but when the page is shown over the app background the
+/// partial edge pixels keep a white matte and read as a one-pixel white fringe.
+///
+/// Inverse the matte using the page rectangle's coverage: `out = content +
+/// white * (1 - page_coverage)` becomes `content = out - white * (1 - c)` and
+/// `alpha = c`. Pixels inside the page keep their original result; only page
+/// boundary pixels change. The white paper visible *inside* the page is part
+/// of the content and stays intact.
+fn unmatte_eps_page(
+    image: &mut RgbaImage,
+    page_width: f64,
+    page_height: f64,
+    transform: ViewTransform,
+) {
+    if page_width <= 0.0 || page_height <= 0.0 || image.width == 0 || image.height == 0 {
+        return;
+    }
+    let x0 = f64::from(transform.e);
+    let x1 = x0 + f64::from(transform.a) * page_width;
+    let y0 = f64::from(transform.f);
+    let y1 = y0 + f64::from(transform.d) * page_height;
+    let width = f64::from(image.width);
+    let height = f64::from(image.height);
+    // The common crop covers the whole texture; avoid touching every pixel.
+    if x0 <= 0.0 && x1 >= width && y0 <= 0.0 && y1 >= height {
+        return;
+    }
+
+    for y in 0..image.height {
+        let cy = interval_coverage(y, y0, y1);
+        if cy <= 0.0 {
+            clear_scanline(image, y);
+            continue;
+        }
+        for x in 0..image.width {
+            let cx = interval_coverage(x, x0, x1);
+            let coverage = cx * cy;
+            if coverage >= 1.0 - 1e-4 {
+                continue;
+            }
+            let index = (y as usize * image.width as usize + x as usize) * 4;
+            if coverage <= 0.0 {
+                image.pixels[index..index + 4].fill(0);
+                continue;
+            }
+            // stet added `255 - alpha` to each premultiplied channel to put
+            // the page on white. Remove the same amount for the page area the
+            // output pixel does not cover.
+            let white = (1.0 - coverage) * 255.0;
+            for channel in &mut image.pixels[index..index + 3] {
+                let premultiplied = (f64::from(*channel) - white).max(0.0);
+                *channel = (premultiplied / coverage).round().clamp(0.0, 255.0) as u8;
+            }
+            image.pixels[index + 3] = (coverage * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+fn interval_coverage(pixel: u32, start: f64, end: f64) -> f64 {
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    let pixel_start = f64::from(pixel);
+    let pixel_end = pixel_start + 1.0;
+    (end.min(pixel_end) - start.max(pixel_start)).clamp(0.0, 1.0)
+}
+
+fn clear_scanline(image: &mut RgbaImage, y: u32) {
+    let start = y as usize * image.width as usize * 4;
+    let end = start + image.width as usize * 4;
+    image.pixels[start..end].fill(0);
 }
 
 fn vello_pixmap_to_rgba(pixmap: &hayro::vello_cpu::Pixmap) -> RgbaImage {
@@ -840,6 +934,76 @@ mod tests {
     }
 
     #[test]
+    fn eps_view_render_removes_white_paper_at_fractional_page_edges() {
+        let document = fixture("vector.eps");
+        let image = document
+            .render_page_view(
+                0,
+                800,
+                600,
+                ViewTransform {
+                    a: 2.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 2.0,
+                    e: 0.3,
+                    f: 0.3,
+                },
+            )
+            .unwrap();
+        // The page background is dark and fills the page edge. The boundary
+        // pixel must keep that color with partial coverage instead of being
+        // matted onto stet's white paper.
+        let corner = image.pixel(0, 0).unwrap();
+        assert!(
+            corner.r < 40 && corner.g < 40 && corner.b < 40,
+            "{corner:?}"
+        );
+        assert!(corner.a > 0 && corner.a < 255, "{corner:?}");
+        let inner = image.pixel(10, 10).unwrap();
+        assert_eq!(inner.a, 255);
+        assert!(inner.r < 40, "{inner:?}");
+    }
+
+    #[test]
+    fn eps_view_render_keeps_white_paper_inside_the_page() {
+        let bytes =
+            b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 100 100\nshowpage\n%%EOF".to_vec();
+        let document = VectorDocument::from_bytes(bytes, "eps").unwrap();
+        let image = document
+            .render_page_view(
+                0,
+                200,
+                200,
+                ViewTransform {
+                    a: 2.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 2.0,
+                    e: 0.3,
+                    f: 0.3,
+                },
+            )
+            .unwrap();
+        // An unpainted page is white paper. Only its coverage is removed at
+        // the page edge; the paper color itself must survive.
+        let corner = image.pixel(0, 0).unwrap();
+        assert!(
+            corner.r > 240 && corner.g > 240 && corner.b > 240,
+            "{corner:?}"
+        );
+        assert!(corner.a > 0 && corner.a < 255, "{corner:?}");
+    }
+
+    #[test]
+    fn eps_does_not_use_the_gpu_scene_when_rotated() {
+        assert!(!fixture("vector.eps").supports_gpu_rotation());
+        assert!(!fixture("vector-eps.ai").supports_gpu_rotation());
+        assert!(fixture("vector.svg").supports_gpu_rotation());
+        assert!(fixture("vector.pdf").supports_gpu_rotation());
+    }
+
+    #[test]
     fn svg_builds_a_gpu_scene_for_solid_paths() {
         let document = fixture("vector-red.svg");
         let scene = document.build_gpu_scene(
@@ -940,7 +1104,9 @@ mod tests {
                 f: 20.0,
             },
         );
-        assert!(rotated.is_some());
+        // Rotated EPS uses the CPU raster: Vello's white paper path would
+        // double-antialias the page edge and leave a white fringe.
+        assert!(rotated.is_none());
     }
 
     #[test]

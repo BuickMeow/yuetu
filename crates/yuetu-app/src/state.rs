@@ -124,7 +124,12 @@ impl VectorSource {
         height: u32,
         rotation: f32,
     ) -> Option<Arc<RgbaImage>> {
+        // Rotated EPS cannot use the GPU scene: the white paper path would
+        // antialias independently from the artwork and leave a white fringe.
+        // `render_page_rotated_to_size` renders the page first, then rotates
+        // the finished opaque raster with premultiplied alpha.
         if !self.document.page_has_alpha()
+            && rotation == 0.0
             && let Some(transform) = self
                 .document
                 .rotation_target_transform(self.page, width, height, rotation)
@@ -284,11 +289,20 @@ impl VectorSource {
         // GPU path rendering is fast enough to run during a zoom or pan. Doing
         // it before the fallback debounce keeps SVG sources sharp for the whole
         // gesture instead of showing an upscaled page raster for 80 ms.
-        let gpu_texture = self
-            .gpu
-            .borrow_mut()
-            .as_mut()
-            .and_then(|gpu| gpu.render(&self.document, self.page, width, height, transform));
+        //
+        // Rotated EPS stays on the CPU: its white paper path and the artwork
+        // share the page edge, and compositing two independently antialiased
+        // paths in Vello leaves a white fringe. The CPU raster rotates the
+        // finished opaque page with premultiplied alpha instead.
+        let gpu_allowed = self.document.supports_gpu_rotation() || rotation == 0.0;
+        let gpu_texture = if gpu_allowed {
+            self.gpu
+                .borrow_mut()
+                .as_mut()
+                .and_then(|gpu| gpu.render(&self.document, self.page, width, height, transform))
+        } else {
+            None
+        };
         if let Some(texture) = gpu_texture {
             *self.pending.borrow_mut() = None;
             self.gpu_key.set(Some(key));
