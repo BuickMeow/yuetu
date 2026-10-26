@@ -228,6 +228,15 @@ impl VectorSource {
             .clamp(1, MAX_TEXTURE_SIDE as usize) as u32;
         let rotation = normalize_degrees(rotation_deg);
         let fallback = || self.ensure_fallback(ctx, display_size, rotation, max_side);
+        // stet only renders axis-aligned regions, and Vello's white paper path
+        // fringes when rotated. Rotated EPS therefore uses the full-page
+        // rotated raster instead of trying a viewport crop every frame.
+        if !self.document.supports_gpu_rotation() && rotation != 0.0 {
+            return Some(VectorDraw {
+                texture: fallback()?,
+                rect: content,
+            });
+        }
         if !self.document.supports_view_render() {
             return Some(VectorDraw {
                 texture: fallback()?,
@@ -289,20 +298,11 @@ impl VectorSource {
         // GPU path rendering is fast enough to run during a zoom or pan. Doing
         // it before the fallback debounce keeps SVG sources sharp for the whole
         // gesture instead of showing an upscaled page raster for 80 ms.
-        //
-        // Rotated EPS stays on the CPU: its white paper path and the artwork
-        // share the page edge, and compositing two independently antialiased
-        // paths in Vello leaves a white fringe. The CPU raster rotates the
-        // finished opaque page with premultiplied alpha instead.
-        let gpu_allowed = self.document.supports_gpu_rotation() || rotation == 0.0;
-        let gpu_texture = if gpu_allowed {
-            self.gpu
-                .borrow_mut()
-                .as_mut()
-                .and_then(|gpu| gpu.render(&self.document, self.page, width, height, transform))
-        } else {
-            None
-        };
+        let gpu_texture = self
+            .gpu
+            .borrow_mut()
+            .as_mut()
+            .and_then(|gpu| gpu.render(&self.document, self.page, width, height, transform));
         if let Some(texture) = gpu_texture {
             *self.pending.borrow_mut() = None;
             self.gpu_key.set(Some(key));
