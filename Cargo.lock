@@ -5100,8 +5100,6 @@ dependencies = [
  "pollster 0.4.0",
  "resvg",
  "stet",
- "stet-fonts",
- "stet-graphics",
  "thiserror 2.0.21",
  "usvg",
  "vello_common 0.3.0",

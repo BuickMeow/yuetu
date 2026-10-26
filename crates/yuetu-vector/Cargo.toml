@@ -10,8 +10,6 @@ license.workspace = true
 hayro = "0.8"
 resvg = "0.49"
 stet = { version = "0.8", default-features = false, features = ["render"] }
-stet-fonts = "0.8"
-stet-graphics = "0.8"
 thiserror.workspace = true
 usvg = "0.49"
 vello_common = "0.3"

@@ -11,7 +11,6 @@ use thiserror::Error;
 use yuetu_core::{ResizeAlgorithm, RgbaImage, resize::resize};
 
 mod gpu;
-mod gpu_eps;
 mod gpu_pdf;
 
 #[derive(Debug, Error)]
@@ -329,17 +328,9 @@ impl VectorDocument {
                 let page = pages.get(page)?;
                 gpu_pdf::build(page, width, height, transform)
             }
-            Backend::Eps(eps) => {
-                let page = eps.pages.get(page)?;
-                gpu_eps::build(
-                    &page.display_list,
-                    f64::from(page.width),
-                    f64::from(page.height),
-                    width,
-                    height,
-                    transform,
-                )
-            }
+            // EPS paper is composited in the CPU renderer. Using a separate
+            // white paper path in Vello double-antialiases shared page edges.
+            Backend::Eps(_) => None,
         }
     }
 
@@ -1180,57 +1171,24 @@ mod tests {
     }
 
     #[test]
-    fn eps_builds_a_gpu_scene_for_paths() {
-        let document = fixture("vector.eps");
-        let scene = document.build_gpu_scene(
-            0,
-            800,
-            600,
-            ViewTransform {
-                a: 2.0,
-                b: 0.0,
-                c: 0.0,
-                d: 2.0,
-                e: 0.0,
-                f: 0.0,
-            },
-        );
-        assert!(scene.is_some());
-        let rotated = document.build_gpu_scene(
-            0,
-            800,
-            600,
-            ViewTransform {
-                a: 1.732,
-                b: 1.0,
-                c: -1.732,
-                d: 1.0,
-                e: 300.0,
-                f: 20.0,
-            },
-        );
-        // Rotated EPS uses the CPU raster: Vello's white paper path would
-        // double-antialias the page edge and leave a white fringe.
-        assert!(rotated.is_none());
-    }
-
-    #[test]
-    fn old_ai_builds_a_gpu_scene_through_postscript() {
-        let document = fixture("vector-eps.ai");
-        let scene = document.build_gpu_scene(
-            0,
-            800,
-            600,
-            ViewTransform {
-                a: 2.0,
-                b: 0.0,
-                c: 0.0,
-                d: 2.0,
-                e: 0.0,
-                f: 0.0,
-            },
-        );
-        assert!(scene.is_some());
+    fn eps_uses_the_cpu_renderer_for_every_transform() {
+        for name in ["vector.eps", "vector-eps.ai"] {
+            let document = fixture(name);
+            let scene = document.build_gpu_scene(
+                0,
+                800,
+                600,
+                ViewTransform {
+                    a: 2.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 2.0,
+                    e: 0.0,
+                    f: 0.0,
+                },
+            );
+            assert!(scene.is_none(), "{name}");
+        }
     }
 
     #[test]
