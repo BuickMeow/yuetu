@@ -929,7 +929,8 @@ impl eframe::App for YuetuApp {
             let live = controls_action.rotation_dragging
                 || ctx.input(|input| input.pointer.primary_down());
             if let Some(source) = self.source.as_mut() {
-                match source.set_rotation(&ctx, degrees, self.stage == PipelineStage::Source) {
+                match source.set_rotation(&ctx, degrees, self.stage == PipelineStage::Source, live)
+                {
                     Ok(true) => {
                         self.source_revision = self.source_revision.wrapping_add(1);
                         self.stage_hover = None;
@@ -960,7 +961,7 @@ impl eframe::App for YuetuApp {
             self.settings = Settings::default();
             self.coordinate_origin = CoordinateOrigin::BottomLeft;
             if let Some(source) = self.source.as_mut() {
-                match source.set_rotation(&ctx, 0.0, self.stage == PipelineStage::Source) {
+                match source.set_rotation(&ctx, 0.0, self.stage == PipelineStage::Source, false) {
                     Ok(true) => {
                         self.source_revision = self.source_revision.wrapping_add(1);
                         self.source_view.reset_fit();
@@ -1005,6 +1006,11 @@ impl eframe::App for YuetuApp {
         }
         if self.rotation_scrub_pending && !ctx.input(|input| input.pointer.primary_down()) {
             self.rotation_scrub_pending = false;
+            if let Some(source) = self.source.as_mut() {
+                if let Err(error) = source.finalize_rotation_preview(&ctx) {
+                    self.status = StatusMessage::error(format!("旋转失败：{error}"));
+                }
+            }
             self.status = StatusMessage::info("正在更新预览…");
             self.schedule_auto_conversion(&ctx, AUTO_CONVERT_DEBOUNCE);
             acted = true;

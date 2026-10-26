@@ -298,6 +298,32 @@ impl VectorDocument {
         self.render_page_rotated_to_fit(0, width, height, degrees)
     }
 
+    /// Render a page rotated clockwise into a tight raster whose long side is
+    /// at most `long_side`. Unlike [`Self::render_page_rotated_to_fit`], the
+    /// result has no transparent padding; this is used as a cheap live
+    /// interaction image while the rotation slider is being dragged.
+    pub fn render_page_rotated_tight(
+        &self,
+        page: usize,
+        long_side: u32,
+        degrees: f32,
+    ) -> Result<RgbaImage, VectorError> {
+        let (page_w, page_h) = self.page_size(page).ok_or(VectorError::InvalidPage)?;
+        if page_w <= 0.0 || page_h <= 0.0 || long_side == 0 {
+            return Err(VectorError::InvalidSize);
+        }
+        let angle = normalize_degrees(degrees);
+        let (rotated_w, rotated_h) = rotated_page_size(page_w, page_h, angle);
+        let scale = long_side as f32 / rotated_w.max(rotated_h);
+        let base_width = (page_w * scale).round().max(1.0) as u32;
+        let base_height = (page_h * scale).round().max(1.0) as u32;
+        let base = self.render_page_exact(page, base_width, base_height)?;
+        if angle.abs() < 1e-4 {
+            return Ok(base);
+        }
+        rotate_image(&base, angle).map_err(|error| VectorError::Parse(error.to_string()))
+    }
+
     /// Render a page rotated clockwise into a fitted RGBA raster.
     pub fn render_page_rotated_to_fit(
         &self,

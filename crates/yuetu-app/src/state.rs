@@ -25,6 +25,9 @@ const THUMBNAIL_MAX_SIDE: u32 = 96;
 /// Working-resolution source used by stage previews while scrubbing. The
 /// final conversion still uses the original image.
 const INTERACTION_MAX_SIDE: u32 = 1024;
+/// Small vector raster used only while the rotation slider is moving. The
+/// full interaction/display rasters are rebuilt once the drag ends.
+const LIVE_ROTATION_PREVIEW_SIDE: u32 = 256;
 /// Rasterization width used by the existing pixel pipeline for SVG sources.
 /// Display rendering is independent and follows the viewport zoom.
 const VECTOR_RASTER_LONG_SIDE: u32 = 2048;
@@ -118,6 +121,13 @@ impl VectorSource {
         self.document.page_has_alpha()
     }
 
+    fn rotation_interaction_image(&self, max_side: u32, rotation: f32) -> Option<Arc<RgbaImage>> {
+        self.document
+            .render_page_rotated_tight(self.page, max_side, rotation)
+            .ok()
+            .map(Arc::new)
+    }
+
     fn page_size(&self) -> Option<(f32, f32)> {
         self.document.page_size(self.page)
     }
@@ -200,10 +210,10 @@ impl VectorSource {
             .input(|input| input.max_texture_side)
             .clamp(1, MAX_TEXTURE_SIDE as usize) as u32;
         let rotation = normalize_degrees(rotation_deg);
-        let fallback = self.ensure_fallback(ctx, display_size, rotation, max_side)?;
+        let fallback = || self.ensure_fallback(ctx, display_size, rotation, max_side);
         if !self.document.supports_view_render() {
             return Some(VectorDraw {
-                texture: fallback,
+                texture: fallback()?,
                 rect: content,
             });
         }
@@ -211,7 +221,7 @@ impl VectorSource {
         let visible = content.intersect(viewport);
         if !visible.is_positive() {
             return Some(VectorDraw {
-                texture: fallback,
+                texture: fallback()?,
                 rect: content,
             });
         }
@@ -296,7 +306,7 @@ impl VectorSource {
                     if elapsed < VECTOR_RENDER_DEBOUNCE {
                         ctx.request_repaint_after(VECTOR_RENDER_DEBOUNCE - elapsed);
                         return Some(VectorDraw {
-                            texture: fallback,
+                            texture: fallback()?,
                             rect: content,
                         });
                     }
@@ -305,7 +315,7 @@ impl VectorSource {
                     *pending = Some((key, now));
                     ctx.request_repaint_after(VECTOR_RENDER_DEBOUNCE);
                     return Some(VectorDraw {
-                        texture: fallback,
+                        texture: fallback()?,
                         rect: content,
                     });
                 }
@@ -321,7 +331,7 @@ impl VectorSource {
                 tracing::warn!("failed to render vector viewport: {error}");
                 *self.pending.borrow_mut() = None;
                 return Some(VectorDraw {
-                    texture: fallback,
+                    texture: fallback()?,
                     rect: content,
                 });
             }
@@ -370,6 +380,9 @@ pub struct SourceImage {
     original_palette: Option<Palette>,
     frame_index: usize,
     rotation_deg: f32,
+    /// A live vector rotation updated only the cheap geometry fields. The
+    /// display/interaction rasters are rebuilt once the drag ends.
+    rotation_preview_dirty: bool,
     thumbnails: Vec<Option<Thumbnail>>,
     pub texture: TextureHandle,
     texture_dirty: bool,
@@ -455,6 +468,7 @@ impl SourceImage {
             original_palette,
             frame_index: 0,
             rotation_deg: 0.0,
+            rotation_preview_dirty: false,
             thumbnails: std::iter::repeat_with(|| None)
                 .take(thumbnail_count)
                 .collect(),
@@ -648,13 +662,55 @@ impl SourceImage {
         ctx: &egui::Context,
         degrees: f32,
         upload_display_texture: bool,
+        interactive: bool,
     ) -> yuetu_core::Result<bool> {
         let degrees = normalize_degrees(degrees);
-        if (degrees - self.rotation_deg).abs() < 1e-4 {
+        let changed = (degrees - self.rotation_deg).abs() >= 1e-4;
+        if !changed && !(self.rotation_preview_dirty && !interactive) {
             return Ok(false);
         }
 
-        let (display_image, display_size) = prepare_display(ctx, &self.image, degrees)?;
+        self.rotation_deg = degrees;
+        if interactive && self.vector.is_some() {
+            // Vector stages do not need the 2048px display raster while the
+            // slider is moving. The source stage draws through Vello directly;
+            // the key-map/palette stages only need a small interaction image.
+            // Rotating and uploading the full display image every frame was
+            // what made live rotation feel frozen.
+            self.display_size = rotated_dimensions(self.image.width, self.image.height, degrees);
+            self.rotation_preview_dirty = true;
+            if !upload_display_texture {
+                if let Some(image) = self.vector.as_ref().and_then(|vector| {
+                    vector.rotation_interaction_image(LIVE_ROTATION_PREVIEW_SIDE, degrees)
+                }) {
+                    self.interaction_image = image;
+                }
+            }
+            for thumbnail in &mut self.thumbnails {
+                *thumbnail = None;
+            }
+            return Ok(true);
+        }
+
+        self.rebuild_rotation_preview(ctx, upload_display_texture)?;
+        Ok(true)
+    }
+
+    /// Rebuild the CPU display/interaction rasters after a live vector drag.
+    pub fn finalize_rotation_preview(&mut self, ctx: &egui::Context) -> yuetu_core::Result<bool> {
+        if !self.rotation_preview_dirty {
+            return Ok(false);
+        }
+        self.rebuild_rotation_preview(ctx, true)?;
+        Ok(true)
+    }
+
+    fn rebuild_rotation_preview(
+        &mut self,
+        ctx: &egui::Context,
+        upload_display_texture: bool,
+    ) -> yuetu_core::Result<()> {
+        let (display_image, display_size) = prepare_display(ctx, &self.image, self.rotation_deg)?;
         let interaction_image = prepare_interaction_from_display(&display_image)?;
         if upload_display_texture {
             let has_transparency = image_has_transparency(&display_image);
@@ -662,7 +718,7 @@ impl SourceImage {
                 "source:{}:{}:{:.3}",
                 self.path.display(),
                 self.frame_index,
-                degrees
+                self.rotation_deg
             );
             let texture = upload_texture(ctx, &texture_name, &display_image)?;
             self.texture = texture;
@@ -674,12 +730,12 @@ impl SourceImage {
         self.display_image = display_image;
         self.display_size = display_size;
         self.interaction_image = interaction_image;
-        self.rotation_deg = degrees;
+        self.rotation_preview_dirty = false;
         // Frame-strip thumbnails are cached in the old orientation.
         for thumbnail in &mut self.thumbnails {
             *thumbnail = None;
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Upload the current display image if frame scrubbing skipped it while
@@ -1275,6 +1331,7 @@ mod tests {
             original_palette: None,
             frame_index: 0,
             rotation_deg: 0.0,
+            rotation_preview_dirty: false,
             thumbnails: vec![None, None],
             texture,
             texture_dirty: false,
@@ -1292,6 +1349,23 @@ mod tests {
         assert!(source.texture_dirty);
         source.ensure_display_texture(&ctx).unwrap();
         assert!(!source.texture_dirty);
+    }
+
+    #[test]
+    fn live_vector_rotation_defers_the_display_raster_until_release() {
+        let ctx = egui::Context::default();
+        let source_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testdata/vector-red.svg"
+        ));
+        let mut source = SourceImage::load(&ctx, source_path).unwrap();
+        let original_display = source.display_image.width;
+        assert!(source.set_rotation(&ctx, 31.0, false, true).unwrap());
+        assert!(source.rotation_preview_dirty);
+        assert_eq!(source.display_image.width, original_display);
+        assert_ne!(source.display_size, (100, 100));
+        assert!(source.finalize_rotation_preview(&ctx).unwrap());
+        assert!(!source.rotation_preview_dirty);
     }
 
     #[test]
