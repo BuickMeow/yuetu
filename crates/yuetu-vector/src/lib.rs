@@ -724,7 +724,7 @@ fn unmatte_eps_page(
         for x in 0..image.width {
             let cx = interval_coverage(x, x0, x1);
             let coverage = cx * cy;
-            if coverage >= 1.0 - 1e-4 {
+            if coverage >= 1.0 {
                 continue;
             }
             let index = (y as usize * image.width as usize + x as usize) * 4;
